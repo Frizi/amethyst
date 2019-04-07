@@ -63,6 +63,12 @@ extra bounds from `AnimatablePrefab` and `AnimationSetPrefab` ([#1435])
 * `amethyst_test` returns the panic message of a failed execution. ([#1499])
 * Binary files across the repository are now tracked with `git-lfs`. ([#1509])
 
+#### Rendy support
+
+* `camera::Projection::perspective()` now returns a vulkan specific perspective matrix ([#1504])
+
+[#1504]: https://github.com/amethyst/amethyst/pull/1504
+
 ### Removed
 
 ### Fixed
