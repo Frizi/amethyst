@@ -61,6 +61,7 @@ extra bounds from `AnimatablePrefab` and `AnimationSetPrefab` ([#1435])
 * Renamed `Text` UI Prefab to `Label` in preparation for full widget integration in prefabs. ([#1390])
 * `amethyst_test` includes the application name of a failing test. ([#1499])
 * `amethyst_test` returns the panic message of a failed execution. ([#1499])
+* Binary files across the repository are now tracked with `git-lfs`. ([#1509])
 
 ### Removed
 
@@ -114,6 +115,7 @@ extra bounds from `AnimatablePrefab` and `AnimationSetPrefab` ([#1435])
 [#1480]: https://github.com/amethyst/amethyst/pull/1480
 [#1499]: https://github.com/amethyst/amethyst/pull/1499
 [#1501]: https://github.com/amethyst/amethyst/pull/1501
+[#1509]: https://github.com/amethyst/amethyst/pull/1509
 
 ## [0.10.0] - 2018-12
 
