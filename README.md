@@ -78,6 +78,13 @@ If you don't understand a part of the documentation, please let us know. Join us
 
 ## Getting started
 
+### Before you begin
+
+This repository uses Git LFS. Before you clone, make sure you have it installed in your system.
+You can download it and read the installation instructions at [Git LFS home page](https://git-lfs.github.com/).
+
+### Examples
+
 To compile any of the examples run:
 
 ```
