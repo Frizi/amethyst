@@ -1,16 +1,21 @@
 //! Set of predefined implementations of `RenderPlugin` for use with `RenderingBundle`.
 
 use crate::{
-    bundle::{RenderOrder, RenderPlan, RenderPlugin, Target},
+    bundle::{
+        ImageOptions, OutputColor, RenderOrder, RenderPlan, RenderPlugin, Target, TargetImage,
+    },
     pass::*,
     sprite_visibility::SpriteVisibilitySortingSystem,
     visibility::VisibilitySortingSystem,
-    Backend, Factory,
+    Backend, Factory, Format, Kind,
 };
 use amethyst_core::ecs::{DispatcherBuilder, World};
 use amethyst_error::Error;
 use palette::Srgb;
-use rendy::graph::render::RenderGroupDesc;
+use rendy::{
+    graph::render::RenderGroupDesc,
+    hal::command::{ClearColor, ClearDepthStencil, ClearValue},
+};
 
 #[cfg(feature = "window")]
 pub use window::RenderToWindow;
@@ -18,17 +23,12 @@ pub use window::RenderToWindow;
 #[cfg(feature = "window")]
 mod window {
     use super::*;
-    use crate::{
-        bundle::{ImageOptions, OutputColor},
-        Format, Kind,
-    };
     use amethyst_config::Config;
     use amethyst_core::{
         ecs::{ReadExpect, SystemData},
         SystemBundle,
     };
     use amethyst_window::{DisplayConfig, ScreenDimensions, Window, WindowBundle};
-    use rendy::hal::command::{ClearColor, ClearDepthStencil, ClearValue};
     use std::path::Path;
 
     /// A [RenderPlugin] for opening a window and displaying a render target to it.
@@ -115,7 +115,7 @@ mod window {
                 clear: Some(ClearValue::DepthStencil(ClearDepthStencil(1.0, 0))),
             };
 
-            plan.add_root(Target::Main);
+            plan.add_root(self.target);
             plan.define_pass(
                 self.target,
                 crate::bundle::TargetPlanOutputs {
@@ -183,15 +183,61 @@ impl<B: Backend, D: Base3DPassDef> RenderPlugin<B> for RenderBase3D<D> {
     ) -> Result<(), Error> {
         let skinning = self.skinning;
         plan.extend_target(self.target, move |ctx| {
+            let shadow_map = ctx.try_get_image(TargetImage::Depth(Target::ShadowMap))?;
+
             ctx.add(
                 RenderOrder::Opaque,
                 DrawBase3DDesc::<B, D>::new()
                     .with_skinning(skinning)
+                    .with_shadow_map(shadow_map)
                     .builder(),
             )?;
             ctx.add(
                 RenderOrder::Transparent,
                 DrawBase3DTransparentDesc::<B, D>::new()
+                    .with_skinning(skinning)
+                    .builder(),
+            )?;
+            Ok(())
+        });
+        Ok(())
+    }
+}
+
+/// A `RenderPlugin` for shadow masking 3d objects.
+#[derive(derivative::Derivative)]
+#[derivative(Default(bound = ""), Debug(bound = ""))]
+pub struct RenderShadows3D {
+    #[derivative(Default(value = "Target::ShadowMap"))]
+    target: Target,
+    skinning: bool,
+}
+
+impl<B: Backend> RenderPlugin<B> for RenderShadows3D {
+    fn on_plan(
+        &mut self,
+        plan: &mut RenderPlan<B>,
+        _factory: &mut Factory<B>,
+        _world: &World,
+    ) -> Result<(), Error> {
+        let skinning = self.skinning;
+        plan.add_root(self.target);
+        plan.define_pass(
+            self.target,
+            crate::bundle::TargetPlanOutputs {
+                colors: vec![],
+                depth: Some(ImageOptions {
+                    kind: Kind::D2(4096, 4096, 1, 1),
+                    levels: 1,
+                    format: Format::D32Sfloat,
+                    clear: Some(ClearValue::DepthStencil(ClearDepthStencil(1.0, 0))),
+                }),
+            },
+        )?;
+        plan.extend_target(self.target, move |ctx| {
+            ctx.add(
+                RenderOrder::Opaque,
+                DrawShadows3DDesc::<B>::new()
                     .with_skinning(skinning)
                     .builder(),
             )?;
@@ -236,6 +282,7 @@ impl<B: Backend> RenderPlugin<B> for RenderFlat2D {
         _factory: &mut Factory<B>,
         _world: &World,
     ) -> Result<(), Error> {
+        plan.add_root(self.target);
         plan.extend_target(self.target, |ctx| {
             ctx.add(RenderOrder::Opaque, DrawFlat2DDesc::new().builder())?;
             ctx.add(

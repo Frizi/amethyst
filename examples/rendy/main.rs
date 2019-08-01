@@ -19,16 +19,12 @@ use amethyst::{
         SystemDesc, Time, Transform, TransformBundle,
     },
     error::Error,
-    gltf::GltfSceneLoaderSystem,
-    input::{
-        is_close_requested, is_key_down, is_key_up, Axis, Bindings, Button, InputBundle,
-        StringBindings,
-    },
+    gltf::GltfSceneLoaderSystemDesc,
+    input::{is_close_requested, InputBundle, InputEvent, StringBindings},
     prelude::*,
     renderer::{
         bundle::{RenderPlan, RenderPlugin},
         debug_drawing::DebugLines,
-        light::{Light, PointLight},
         palette::{LinSrgba, Srgb, Srgba},
         rendy::{
             mesh::{Normal, Position, Tangent, TexCoord},
@@ -39,8 +35,8 @@ use amethyst::{
         types::{DefaultBackend, Mesh, Texture},
         visibility::BoundingSphere,
         ActiveCamera, Camera, Factory, ImageFormat, Material, MaterialDefaults, RenderDebugLines,
-        RenderFlat2D, RenderFlat3D, RenderPbr3D, RenderShaded3D, RenderSkybox, RenderToWindow,
-        RenderingBundle, SpriteRender, SpriteSheet, SpriteSheetFormat, Transparent,
+        RenderFlat2D, RenderFlat3D, RenderPbr3D, RenderShaded3D, RenderShadows3D, RenderSkybox,
+        RenderToWindow, RenderingBundle, SpriteRender, SpriteSheet, SpriteSheetFormat, Transparent,
     },
     utils::{
         application_root_dir,
@@ -251,60 +247,60 @@ impl SimpleState for Example {
             }
         }
 
-        println!("Create lights");
-        let light1: Light = PointLight {
-            intensity: 6.0,
-            color: Srgb::new(0.8, 0.0, 0.0),
-            ..PointLight::default()
-        }
-        .into();
+        // println!("Create lights");
+        // let light1: Light = PointLight {
+        //     intensity: 6.0,
+        //     color: Srgb::new(0.8, 0.0, 0.0),
+        //     ..PointLight::default()
+        // }
+        // .into();
 
-        let mut light1_transform = Transform::default();
-        light1_transform.set_translation_xyz(6.0, 6.0, 6.0);
+        // let mut light1_transform = Transform::default();
+        // light1_transform.set_translation_xyz(6.0, 6.0, 6.0);
 
-        let light2: Light = PointLight {
-            intensity: 5.0,
-            color: Srgb::new(0.0, 0.3, 0.7),
-            ..PointLight::default()
-        }
-        .into();
+        // let light2: Light = PointLight {
+        //     intensity: 5.0,
+        //     color: Srgb::new(0.0, 0.3, 0.7),
+        //     ..PointLight::default()
+        // }
+        // .into();
 
-        let mut light2_transform = Transform::default();
-        light2_transform.set_translation_xyz(6.0, -6.0, 6.0);
+        // let mut light2_transform = Transform::default();
+        // light2_transform.set_translation_xyz(6.0, -6.0, 6.0);
 
-        let light3: Light = PointLight {
-            intensity: 4.0,
-            color: Srgb::new(0.5, 0.5, 0.5),
-            ..PointLight::default()
-        }
-        .into();
+        // let light3: Light = PointLight {
+        //     intensity: 4.0,
+        //     color: Srgb::new(0.5, 0.5, 0.5),
+        //     ..PointLight::default()
+        // }
+        // .into();
 
-        let mut light3_transform = Transform::default();
-        light3_transform.set_translation_xyz(-3.0, 10.0, 2.0);
+        // let mut light3_transform = Transform::default();
+        // light3_transform.set_translation_xyz(-3.0, 10.0, 2.0);
 
-        world
-            .create_entity()
-            .with(light1)
-            .with(light1_transform)
-            .with(Orbit {
-                axis: Unit::new_normalize(Vector3::x()),
-                time_scale: 2.0,
-                center: Vector3::new(6.0, -6.0, -6.0),
-                radius: 5.0,
-            })
-            .build();
+        // world
+        //     .create_entity()
+        //     .with(light1)
+        //     .with(light1_transform)
+        //     .with(Orbit {
+        //         axis: Unit::new_normalize(Vector3::x()),
+        //         time_scale: 2.0,
+        //         center: Vector3::new(6.0, -6.0, -6.0),
+        //         radius: 5.0,
+        //     })
+        //     .build();
 
-        world
-            .create_entity()
-            .with(light2)
-            .with(light2_transform)
-            .build();
+        // world
+        //     .create_entity()
+        //     .with(light2)
+        //     .with(light2_transform)
+        //     .build();
 
-        world
-            .create_entity()
-            .with(light3)
-            .with(light3_transform)
-            .build();
+        // world
+        //     .create_entity()
+        //     .with(light3)
+        //     .with(light3_transform)
+        //     .build();
 
         create_tinted_crates(world);
 
@@ -339,37 +335,37 @@ impl SimpleState for Example {
         #[cfg(feature = "profiler")]
         profile_scope!("example handle_event");
         let StateData { world, .. } = data;
-        if let StateEvent::Window(event) = &event {
-            if is_key_down(&event, winit::VirtualKeyCode::LShift) {
-                self.bullet_time = true;
-            } else if is_key_up(&event, winit::VirtualKeyCode::LShift) {
-                self.bullet_time = false;
-            }
-
-            if is_close_requested(&event) || is_key_down(&event, winit::VirtualKeyCode::Escape) {
-                Trans::Quit
-            } else if is_key_down(&event, winit::VirtualKeyCode::Space) {
-                toggle_or_cycle_animation(
+        match &event {
+            StateEvent::Window(e) if is_close_requested(e) => return Trans::Quit,
+            StateEvent::Input(InputEvent::ActionPressed(action)) => match action.as_ref() {
+                "change_render_mode" => {
+                    let mut mode = world.write_resource::<RenderMode>();
+                    *mode = match *mode {
+                        RenderMode::Flat => RenderMode::Shaded,
+                        RenderMode::Shaded => RenderMode::Pbr,
+                        RenderMode::Pbr => RenderMode::Flat,
+                    };
+                }
+                "cycle_animation" => toggle_or_cycle_animation(
                     self.entity,
                     &mut world.write_resource(),
                     &world.read_storage(),
                     &mut world.write_storage(),
-                );
-                Trans::None
-            } else if is_key_down(&event, winit::VirtualKeyCode::E) {
-                let mut mode = world.write_resource::<RenderMode>();
-                *mode = match *mode {
-                    RenderMode::Flat => RenderMode::Shaded,
-                    RenderMode::Shaded => RenderMode::Pbr,
-                    RenderMode::Pbr => RenderMode::Flat,
-                };
-                Trans::None
-            } else {
-                Trans::None
-            }
-        } else {
-            Trans::None
-        }
+                ),
+                "bullet_time" => self.bullet_time = true,
+                "exit" => return Trans::Quit,
+                _ => {}
+            },
+            StateEvent::Input(InputEvent::ActionReleased(action)) => match action.as_ref() {
+                "bullet_time" => {
+                    self.bullet_time = false;
+                }
+                _ => {}
+            },
+            _ => {}
+        };
+
+        Trans::None
     }
 
     fn update(&mut self, data: &mut StateData<'_, GameData<'_, '_>>) -> SimpleTrans {
@@ -548,7 +544,7 @@ fn main() -> amethyst::Result<()> {
     amethyst::Logger::from_config(amethyst::LoggerConfig {
         stdout: amethyst::StdoutLog::Off,
         log_file: Some("rendy_example.log".into()),
-        level_filter: log::LevelFilter::Error,
+        level_filter: log::LevelFilter::Debug,
         ..Default::default()
     })
     // .level_for("amethyst_utils::fps_counter", log::LevelFilter::Debug)
@@ -562,48 +558,20 @@ fn main() -> amethyst::Result<()> {
     .start();
 
     let app_root = application_root_dir()?;
-
-    let display_config_path = app_root
-        .join("examples")
-        .join("rendy")
-        .join("config")
-        .join("display.ron");
+    let config_dir = app_root.join("examples").join("rendy").join("config");
     let assets_dir = app_root.join("examples").join("assets");
-
-    let mut bindings = Bindings::new();
-    bindings.insert_axis(
-        "vertical",
-        Axis::Emulated {
-            pos: Button::Key(winit::VirtualKeyCode::S),
-            neg: Button::Key(winit::VirtualKeyCode::W),
-        },
-    )?;
-    bindings.insert_axis(
-        "horizontal",
-        Axis::Emulated {
-            pos: Button::Key(winit::VirtualKeyCode::D),
-            neg: Button::Key(winit::VirtualKeyCode::A),
-        },
-    )?;
-    bindings.insert_axis(
-        "horizontal",
-        Axis::Emulated {
-            pos: Button::Key(winit::VirtualKeyCode::D),
-            neg: Button::Key(winit::VirtualKeyCode::A),
-        },
-    )?;
 
     let game_data = GameDataBuilder::default()
         .with(OrbitSystem, "orbit", &[])
-        .with(AutoFovSystem::default(), "auto_fov", &[])
+        .with(AutoFovSystem::new(), "auto_fov", &[])
         .with_bundle(FpsCounterBundle::default())?
-        .with(
-            PrefabLoaderSystemDesc::<ScenePrefabData>::default().build(&mut world),
+        .with_system_desc(
+            PrefabLoaderSystemDesc::<ScenePrefabData>::default(),
             "scene_loader",
             &[],
         )
-        .with(
-            GltfSceneLoaderSystem::new(&mut world),
+        .with_system_desc(
+            GltfSceneLoaderSystemDesc::default(),
             "gltf_loader",
             &["scene_loader"], // This is important so that entity instantiation is performed in a single frame.
         )
@@ -618,7 +586,10 @@ fn main() -> amethyst::Result<()> {
             )
             .with_dep(&["gltf_loader"]),
         )?
-        .with_bundle(InputBundle::<StringBindings>::new().with_bindings(bindings))?
+        .with_bundle(
+            InputBundle::<StringBindings>::new()
+                .with_bindings_from_file(config_dir.join("bindings.ron"))?,
+        )?
         .with_bundle(
             FlyControlBundle::<StringBindings>::new(
                 Some("horizontal".into()),
@@ -643,7 +614,10 @@ fn main() -> amethyst::Result<()> {
         ]))?
         .with_bundle(
             RenderingBundle::<DefaultBackend>::new()
-                .with_plugin(RenderToWindow::from_config_path(display_config_path))
+                .with_plugin(RenderShadows3D::default())
+                .with_plugin(RenderToWindow::from_config_path(
+                    config_dir.join("display.ron"),
+                ))
                 .with_plugin(RenderSwitchable3D::default())
                 .with_plugin(RenderFlat2D::default())
                 .with_plugin(RenderDebugLines::default())
@@ -653,12 +627,7 @@ fn main() -> amethyst::Result<()> {
                 )),
         )?;
 
-    let mut game = Application::new(
-        assets_dir & assets_directory,
-        Example::new(),
-        game_data,
-        world,
-    )?;
+    let mut game = Application::new(&assets_dir, Example::new(), game_data)?;
     game.run();
     Ok(())
 }

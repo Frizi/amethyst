@@ -23,10 +23,11 @@ use rendy::{
     factory::Factory,
     graph::{
         render::{PrepareResult, RenderGroup, RenderGroupDesc},
-        GraphContext, NodeBuffer, NodeImage,
+        DescBuilder, GraphContext, ImageAccess, ImageId, NodeBuffer, NodeImage,
     },
-    hal::{self, device::Device, pso},
+    hal::{self, device::Device, image, pso},
     mesh::{AsVertex, VertexFormat},
+    resource::{Escape, Handle as RendyHandle, ImageView, ImageViewInfo, Sampler},
     shader::{Shader, SpirvShader},
 };
 use smallvec::SmallVec;
@@ -73,6 +74,7 @@ pub trait Base3DPassDef: 'static + std::fmt::Debug + Send + Sync {
 #[derivative(Debug(bound = ""), Default(bound = ""))]
 pub struct DrawBase3DDesc<B: Backend, T: Base3DPassDef> {
     skinning: bool,
+    shadow_map: Option<ImageId>,
     marker: PhantomData<(B, T)>,
 }
 
@@ -86,8 +88,14 @@ impl<B: Backend, T: Base3DPassDef> DrawBase3DDesc<B, T> {
     pub fn skinned() -> Self {
         Self {
             skinning: true,
-            marker: PhantomData,
+            ..Default::default()
         }
+    }
+
+    /// Add shadows using specified image as shadow map. `None` disables shadows.
+    pub fn with_shadow_map(mut self, shadow_map: Option<ImageId>) -> Self {
+        self.shadow_map = shadow_map;
+        self
     }
 
     /// Create pass in with vertex skinning enabled if true is passed
@@ -98,9 +106,35 @@ impl<B: Backend, T: Base3DPassDef> DrawBase3DDesc<B, T> {
 }
 
 impl<B: Backend, T: Base3DPassDef> RenderGroupDesc<B, World> for DrawBase3DDesc<B, T> {
+    fn images(&self) -> Vec<ImageAccess> {
+        let mut vec = Vec::new();
+        if self.shadow_map.is_some() {
+            vec.push(ImageAccess {
+                access: image::Access::SHADER_READ,
+                usage: image::Usage::SAMPLED,
+                layout: image::Layout::ShaderReadOnlyOptimal,
+                stages: pso::PipelineStage::FRAGMENT_SHADER,
+            });
+        }
+        vec
+    }
+
+    fn builder(self) -> DescBuilder<B, World, Self>
+    where
+        Self: Sized,
+    {
+        let shadow_map = self.shadow_map.clone();
+
+        let mut builder = DescBuilder::new(self);
+        if let Some(shadow_map) = shadow_map {
+            builder.add_image(shadow_map);
+        };
+        builder
+    }
+
     fn build(
         self,
-        _ctx: &GraphContext<B>,
+        ctx: &GraphContext<B>,
         factory: &mut Factory<B>,
         _queue: QueueId,
         _aux: &World,
@@ -108,7 +142,7 @@ impl<B: Backend, T: Base3DPassDef> RenderGroupDesc<B, World> for DrawBase3DDesc<
         framebuffer_height: u32,
         subpass: hal::pass::Subpass<'_, B>,
         _buffers: Vec<NodeBuffer>,
-        _images: Vec<NodeImage>,
+        mut images: Vec<NodeImage>,
     ) -> Result<Box<dyn RenderGroup<B, World>>, failure::Error> {
         profile_scope_impl!("build");
 
@@ -144,6 +178,30 @@ impl<B: Backend, T: Base3DPassDef> RenderGroupDesc<B, World> for DrawBase3DDesc<
         vertex_format_base.sort();
         vertex_format_skinned.sort();
 
+        let shadow_map = if self.shadow_map.is_some() {
+            let node_image = images.pop().expect("Shadow map image not passed");
+
+            // this can probably be made into a submodule on it's own
+            let image = ctx.get_image(node_image.id).expect("Image does not exist");
+            let sampler = factory.get_sampler(dbg!(image::SamplerInfo::new(
+                image::Filter::Linear,
+                image::WrapMode::Clamp,
+            )))?;
+            let image_view = factory.create_image_view(
+                image.clone(),
+                ImageViewInfo {
+                    view_kind: image::ViewKind::D2,
+                    format: image.format(),
+                    swizzle: hal::format::Swizzle::NO,
+                    range: node_image.range.clone(),
+                },
+            )?;
+
+            Some((node_image, sampler, image_view))
+        } else {
+            None
+        };
+
         Ok(Box::new(DrawBase3D::<B, T> {
             pipeline_basic: pipelines.remove(0),
             pipeline_skinned: pipelines.pop(),
@@ -157,6 +215,7 @@ impl<B: Backend, T: Base3DPassDef> RenderGroupDesc<B, World> for DrawBase3DDesc<
             skinning,
             models: DynamicVertexBuffer::new(),
             skinned_models: DynamicVertexBuffer::new(),
+            shadow_map,
             marker: PhantomData,
         }))
     }
@@ -179,6 +238,7 @@ pub struct DrawBase3D<B: Backend, T: Base3DPassDef> {
     skinning: SkinningSub<B>,
     models: DynamicVertexBuffer<B, VertexArgs>,
     skinned_models: DynamicVertexBuffer<B, SkinnedVertexArgs>,
+    shadow_map: Option<(NodeImage, RendyHandle<Sampler<B>>, Escape<ImageView<B>>)>,
     marker: PhantomData<T>,
 }
 
@@ -218,7 +278,8 @@ impl<B: Backend, T: Base3DPassDef> RenderGroup<B, World> for DrawBase3D<B, T> {
         )>::fetch(resources);
 
         // Prepare environment
-        self.env.process(factory, index, resources);
+        self.env
+            .process(factory, index, resources, self.shadow_map.as_ref());
         self.materials.maintain();
 
         self.static_batches.clear_inner();
@@ -321,13 +382,19 @@ impl<B: Backend, T: Base3DPassDef> RenderGroup<B, World> for DrawBase3D<B, T> {
                         if let Some(mesh) =
                             B::unwrap_mesh(unsafe { mesh_storage.get_by_id_unchecked(*mesh_id) })
                         {
-                            mesh.bind_and_draw(
+                            if let Err(error) = mesh.bind_and_draw(
                                 0,
                                 &self.vertex_format_base,
                                 instances_drawn..instances_drawn + batch_data.len() as u32,
                                 &mut encoder,
-                            )
-                            .unwrap();
+                            ) {
+                                log::warn!(
+                                    "Trying to draw a mesh that lacks {:?} vertex attributes. Pass {} requires attributes {:?}.",
+                                    error.not_found.attributes,
+                                    T::NAME,
+                                    T::base_format(),
+                                );
+                            }
                         }
                         instances_drawn += batch_data.len() as u32;
                     }
@@ -355,13 +422,19 @@ impl<B: Backend, T: Base3DPassDef> RenderGroup<B, World> for DrawBase3D<B, T> {
                             if let Some(mesh) = B::unwrap_mesh(unsafe {
                                 mesh_storage.get_by_id_unchecked(*mesh_id)
                             }) {
-                                mesh.bind_and_draw(
+                                if let Err(error) = mesh.bind_and_draw(
                                     0,
                                     &self.vertex_format_skinned,
                                     instances_drawn..instances_drawn + batch_data.len() as u32,
                                     &mut encoder,
-                                )
-                                .unwrap();
+                                ) {
+                                    log::warn!(
+                                    "Trying to draw a mesh that lacks {:?} vertex attributes. Pass {} requires attributes {:?}.",
+                                    error.not_found.attributes,
+                                    T::NAME,
+                                    T::base_format(),
+                                );
+                                }
                             }
                             instances_drawn += batch_data.len() as u32;
                         }
@@ -527,7 +600,7 @@ impl<B: Backend, T: Base3DPassDef> RenderGroup<B, World> for DrawBase3DTranspare
             )>::fetch(resources);
 
         // Prepare environment
-        self.env.process(factory, index, resources);
+        self.env.process(factory, index, resources, None);
         self.materials.maintain();
 
         self.static_batches.swap_clear();

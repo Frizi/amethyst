@@ -39,6 +39,9 @@ pub struct DirectionalLight {
     pub intensity: f32,
     /// Direction that the light is pointing.
     pub direction: Vector3<f32>,
+    /// That light casts a dynamic shadow
+    #[serde(default)]
+    pub cast_shadow: bool,
 }
 
 impl Default for DirectionalLight {
@@ -47,6 +50,7 @@ impl Default for DirectionalLight {
             color: Default::default(),
             intensity: 1.0,
             direction: [-1.0, -1.0, -1.0].into(),
+            cast_shadow: false,
         }
     }
 }

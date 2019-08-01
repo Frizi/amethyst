@@ -6,9 +6,12 @@ mod flat;
 mod flat2d;
 mod pbr;
 mod shaded;
+mod shadow;
 mod skybox;
 
-pub use self::{base_3d::*, debug_lines::*, flat::*, flat2d::*, pbr::*, shaded::*, skybox::*};
+pub use self::{
+    base_3d::*, debug_lines::*, flat::*, flat2d::*, pbr::*, shaded::*, shadow::*, skybox::*,
+};
 
 use rendy::{hal::pso::ShaderStageFlags, shader::SpirvShader};
 
@@ -100,6 +103,18 @@ lazy_static::lazy_static! {
     static ref DEBUG_LINES_FRAGMENT: SpirvShader = SpirvShader::new(
         include_bytes!("../../compiled/fragment/debug_lines.frag.spv").to_vec(),
         ShaderStageFlags::FRAGMENT,
+        "main",
+    );
+
+    static ref SHADOW_VERTEX: SpirvShader = SpirvShader::new(
+        include_bytes!("../../compiled/vertex/shadow.vert.spv").to_vec(),
+        ShaderStageFlags::VERTEX,
+        "main",
+    );
+
+    static ref SHADOW_SKIN_VERTEX: SpirvShader = SpirvShader::new(
+        include_bytes!("../../compiled/vertex/shadow_skin.vert.spv").to_vec(),
+        ShaderStageFlags::VERTEX,
         "main",
     );
 }

@@ -1,0 +1,16 @@
+/*!
+    @import /amethyst_input/src/bindings.rs#Bindings, StringBindings
+    Bindings<StringBindings>
+*/
+(
+  axes: {
+    "vertical": Emulated(pos: Key(S), neg: Key(W)),
+    "horizontal": Emulated(pos: Key(D), neg: Key(A)),
+  },
+  actions: {
+      "change_render_mode": [[Key(E)]],
+      "bullet_time": [[Key(LShift)]],
+      "cycle_animation": [[Key(Space)]],
+      "exit": [[Key(Escape)]]
+  },
+)

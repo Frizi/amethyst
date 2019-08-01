@@ -126,11 +126,12 @@ impl<B: Backend> RenderGroup<B, World> for DrawDebugLines<B> {
         };
 
         let cam = CameraGatherer::gather(resources);
+        self.env.write(factory, index, cam.projview);
+
         let line_width = line_params
             .map(|p| p.line_width)
             .unwrap_or(DebugLinesParams::default().line_width);
 
-        self.env.write(factory, index, cam.projview);
         self.args.write(
             factory,
             index,

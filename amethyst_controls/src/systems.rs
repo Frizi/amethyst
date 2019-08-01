@@ -229,14 +229,6 @@ pub struct CursorHideSystemDesc;
 impl<'a, 'b> SystemDesc<'a, 'b, CursorHideSystem> for CursorHideSystemDesc {
     fn build(self, world: &mut World) -> CursorHideSystem {
         <CursorHideSystem as System<'_>>::SystemData::setup(world);
-
-        let win = world.fetch::<Window>();
-
-        if let Err(err) = win.grab_cursor(true) {
-            log::error!("Unable to grab the cursor. Error: {:?}", err);
-        }
-        win.hide_cursor(true);
-
         CursorHideSystem::new()
     }
 }
@@ -245,7 +237,7 @@ impl<'a, 'b> SystemDesc<'a, 'b, CursorHideSystem> for CursorHideSystemDesc {
 /// Requires the usage MouseFocusUpdateSystem at the same time.
 #[derive(Debug, new)]
 pub struct CursorHideSystem {
-    #[new(value = "true")]
+    #[new(value = "false")]
     is_hidden: bool,
 }
 

@@ -58,6 +58,17 @@ pub struct ViewArgs {
     pub view: mat4,
 }
 
+impl ViewArgs {
+    pub fn from_matrices(proj: Matrix4<f32>, view: Matrix4<f32>) -> Self {
+        let proj: [[f32; 4]; 4] = proj.into();
+        let view: [[f32; 4]; 4] = view.into();
+        ViewArgs {
+            proj: proj.into(),
+            view: view.into(),
+        }
+    }
+}
+
 /// Tint
 /// ```glsl,ignore
 /// vec4 tint;
@@ -235,6 +246,12 @@ pub struct SpotLight {
     pub smoothness: float,
 }
 
+#[derive(Clone, Copy, Debug, AsStd140)]
+pub struct ShadowData {
+    /// Transform matrix from view to light space
+    pub view_to_light: mat4,
+}
+
 /// Environment Uniform
 /// ```glsl,ignore
 /// uniform Environment {
@@ -253,8 +270,10 @@ pub struct Environment {
     pub camera_position: vec3,
     /// Number of point lights
     pub point_light_count: int,
-    /// Number of directional lights
+    /// Number of all directional lights (including shadowed)
     pub directional_light_count: int,
+    /// Number of shadowed directional lights
+    pub shadow_count: int,
     /// Number of spot lights
     pub spot_light_count: int,
 }

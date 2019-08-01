@@ -1,6 +1,13 @@
 #version 450
 
-// layout(early_fragment_tests) in;
+struct Partition
+{
+    float intervalBegin;
+    float intervalEnd;
+    // These are given in texture coordinate [0, 1] space
+    vec3 scale;
+    vec3 bias;
+};
 
 struct PointLight {
     vec3 position;
@@ -29,6 +36,7 @@ layout(std140, set = 0, binding = 1) uniform Environment {
     vec3 camera_position; 
     int point_light_count;
     int directional_light_count;
+    int shadow_count;
     int spot_light_count;
 };
 
@@ -43,6 +51,12 @@ layout(std140, set = 0, binding = 3) uniform DirectionalLights {
 layout(std140, set = 0, binding = 4) uniform SpotLights {
     SpotLight slight[128];
 };
+
+layout(std140, set = 0, binding = 5) uniform ShadowData {
+    mat4 view_to_light;
+};
+
+layout(set = 0, binding = 6) uniform sampler2DArray shadow_map;
 
 struct UvOffset {
     vec2 u_offset;
@@ -71,6 +85,8 @@ layout(location = 0) in VertexData {
 } vertex;
 
 layout(location = 0) out vec4 out_color;
+
+// #include "../evsm.glsl"
 
 const float PI = 3.14159265359;
 
@@ -138,6 +154,17 @@ vec3 compute_light(vec3 attenuation,
     return resulting_light;
 }
 
+float shadow_contribution_threshold(uint light_idx, vec2 tex_coord, vec2 tex_coord_dx, vec2 tex_coord_dy, float depth, Partition part, uint textureArrayIndex)
+{
+    vec4 occluder = texture(shadow_map, vec3(tex_coord, textureArrayIndex));
+    return occluder.x + 0.00001 >= depth ? 1.0 : 0.0;
+}
+
+vec3 project_into_light_tex_coord(uint shadow_idx) {
+    vec4 position_light = view_to_light * vec4(vertex.position, 1.0);
+    return (position_light.xyz / position_light.w) * vec3(0.5, 0.5, 1.0) + vec3(0.5, 0.5, 0.0);
+}
+
 void main() {
     vec2 final_tex_coords   = tex_coords(vertex.tex_coord, uv_offset.u_offset, uv_offset.v_offset);
     vec4 albedo_alpha       = texture(albedo, final_tex_coords);
@@ -185,7 +212,47 @@ void main() {
         lighted += light;
     }
 
-    for (int i = 0; i < directional_light_count; i++) {
+    int i = 0;
+    for (; i < shadow_count; i++) {
+        vec3 light_direction = -normalize(dlight[i].direction);
+        float attenuation = dlight[i].intensity;
+        vec3 projected = project_into_light_tex_coord(i);
+        vec2 tex_coord = projected.xy;
+        vec2 tex_coord_dx = dFdx(tex_coord);
+        vec2 tex_coord_dy = dFdy(tex_coord);
+        
+        const Partition part = Partition(
+            0.0,
+            1.0,
+            vec3(1.0, 1.0, 1.0),
+            vec3(0.0, 0.0, 0.0)
+        );
+
+        attenuation *= shadow_contribution_threshold(i, tex_coord, tex_coord_dx, tex_coord_dy, projected.z, part, 0);
+        
+    // if (surface.positionView.z < partition.intervalEnd) {
+    //     float3 tex_coord = surface.lighttex_coord.xyz * partition.scale.xyz + partition.bias.xyz;
+    //     float3 tex_coordDX = surface.lighttex_coordDX.xyz * partition.scale.xyz;
+    //     float3 tex_coordDY = surface.lighttex_coordDY.xyz * partition.scale.xyz;
+    //     float depth = clamp(tex_coord.z, 0.0f, 1.0f);
+    
+    //     float shadowContrib = ShadowContribution(tex_coord, tex_coordDX, tex_coordDY, depth, partition, i);
+    // }
+
+        vec3 light = compute_light(vec3(attenuation),
+                                   dlight[i].color,
+                                   view_direction,
+                                   light_direction,
+                                   albedo,
+                                   normal,
+                                   roughness2,
+                                   metallic,
+                                   fresnel_base);
+
+        lighted += light;
+    }
+    for (; i < directional_light_count; i++) {
+    // for (int i = 0; i < directional_light_count; i++) {
         vec3 light_direction = -normalize(dlight[i].direction);
         float attenuation = dlight[i].intensity;
 

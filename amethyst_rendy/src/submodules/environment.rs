@@ -1,14 +1,19 @@
 //! Environment submodule for shared environmental descriptor set data.
 //! Fetches and sets projection and lighting descriptor set information.
 use crate::{
+    camera::Orthographic,
     light::Light,
     pod::{self, IntoPod},
     rendy::{
         command::RenderPassEncoder,
         factory::Factory,
+        graph::NodeImage,
         hal::{self, adapter::PhysicalDevice, device::Device, pso::Descriptor},
         memory::Write as _,
-        resource::{Buffer, DescriptorSet, DescriptorSetLayout, Escape, Handle as RendyHandle},
+        resource::{
+            Buffer, DescriptorSet, DescriptorSetLayout, Escape, Handle as RendyHandle, ImageView,
+            Sampler,
+        },
     },
     submodules::gather::{AmbientGatherer, CameraGatherer},
     types::Backend,
@@ -16,7 +21,7 @@ use crate::{
 };
 use amethyst_core::{
     ecs::{Join, ReadStorage, SystemData, World},
-    math::{convert, Vector3},
+    math::{convert, Matrix4, Point3, Vector3},
     transform::Transform,
 };
 use glsl_layout::*;
@@ -54,7 +59,12 @@ impl<B: Backend> EnvironmentSub<B> {
         flags: [hal::pso::ShaderStageFlags; 2],
     ) -> Result<Self, failure::Error> {
         Ok(Self {
-            layout: set_layout! {factory, [1] UniformBuffer flags[0], [4] UniformBuffer flags[1]},
+            layout: set_layout! {
+                factory,
+                [1] UniformBuffer flags[0],
+                [5] UniformBuffer flags[1],
+                [1] CombinedImageSampler hal::pso::ShaderStageFlags::FRAGMENT
+            },
             per_image: Vec::new(),
         })
     }
@@ -65,7 +75,13 @@ impl<B: Backend> EnvironmentSub<B> {
     }
 
     /// Performs any re-allocation and GPU memory writing required for this environment set.
-    pub fn process(&mut self, factory: &Factory<B>, index: usize, world: &World) -> bool {
+    pub fn process(
+        &mut self,
+        factory: &Factory<B>,
+        index: usize,
+        world: &World,
+        shadow_map: Option<&(NodeImage, RendyHandle<Sampler<B>>, Escape<ImageView<B>>)>,
+    ) -> bool {
         #[cfg(feature = "profiler")]
         profile_scope!("process");
 
@@ -76,7 +92,7 @@ impl<B: Backend> EnvironmentSub<B> {
             }
             &mut self.per_image[index]
         };
-        this_image.process(factory, world)
+        this_image.process(factory, world, shadow_map)
     }
 
     /// Binds this environment set for all images.
@@ -117,7 +133,12 @@ impl<B: Backend> PerImageEnvironmentSub<B> {
         }
     }
 
-    fn process(&mut self, factory: &Factory<B>, world: &World) -> bool {
+    fn process(
+        &mut self,
+        factory: &Factory<B>,
+        world: &World,
+        shadow_map: Option<&(NodeImage, RendyHandle<Sampler<B>>, Escape<ImageView<B>>)>,
+    ) -> bool {
         let align = factory
             .physical()
             .limits()
@@ -128,14 +149,16 @@ impl<B: Backend> PerImageEnvironmentSub<B> {
         let plight_buf_size = util::align_size::<pod::PointLight>(align, MAX_POINT_LIGHTS);
         let dlight_buf_size = util::align_size::<pod::DirectionalLight>(align, MAX_DIR_LIGHTS);
         let slight_buf_size = util::align_size::<pod::SpotLight>(align, MAX_SPOT_LIGHTS);
+        let shadow_buf_size = util::align_size::<pod::ShadowData>(align, 1);
 
         let projview_range = 0..projview_size;
         let env_range = util::next_range(&projview_range, env_buf_size);
         let plight_range = util::next_range(&env_range, plight_buf_size);
         let dlight_range = util::next_range(&plight_range, dlight_buf_size);
         let slight_range = util::next_range(&dlight_range, slight_buf_size);
+        let shadow_range = util::next_range(&slight_range, shadow_buf_size);
 
-        let whole_range = 0..slight_range.end;
+        let whole_range = 0..shadow_range.end;
 
         let new_buffer = util::ensure_buffer(
             &factory,
@@ -156,22 +179,39 @@ impl<B: Backend> PerImageEnvironmentSub<B> {
                 let desc_plight = Descriptor::Buffer(buffer, opt_range(plight_range.clone()));
                 let desc_dlight = Descriptor::Buffer(buffer, opt_range(dlight_range.clone()));
                 let desc_slight = Descriptor::Buffer(buffer, opt_range(slight_range.clone()));
+                let desc_shadow = Descriptor::Buffer(buffer, opt_range(shadow_range.clone()));
+
+                let mut sets = vec![
+                    desc_write(env_set, 0, desc_projview),
+                    desc_write(env_set, 1, desc_env),
+                    desc_write(env_set, 2, desc_plight),
+                    desc_write(env_set, 3, desc_dlight),
+                    desc_write(env_set, 4, desc_slight),
+                    desc_write(env_set, 5, desc_shadow),
+                ];
+
+                if let Some(shadow_map) = shadow_map {
+                    let desc_shadow_map = Descriptor::CombinedImageSampler(
+                        shadow_map.2.raw(),
+                        shadow_map.0.layout,
+                        shadow_map.1.raw(),
+                    );
+                    sets.push(desc_write(env_set, 6, desc_shadow_map))
+                }
 
                 unsafe {
-                    factory.write_descriptor_sets(vec![
-                        desc_write(env_set, 0, desc_projview),
-                        desc_write(env_set, 1, desc_env),
-                        desc_write(env_set, 2, desc_plight),
-                        desc_write(env_set, 3, desc_dlight),
-                        desc_write(env_set, 4, desc_slight),
-                    ]);
+                    factory.write_descriptor_sets(sets);
                 }
             }
 
             let CameraGatherer {
                 camera_position,
                 projview,
+                camera_view,
+                ..
             } = CameraGatherer::gather(world);
+
+            let camera_view_inv = camera_view.try_inverse().unwrap();
 
             let mut mapped = buffer.map(factory, whole_range.clone()).unwrap();
             let mut writer = unsafe { mapped.write::<u8>(factory, whole_range.clone()).unwrap() };
@@ -182,9 +222,12 @@ impl<B: Backend> PerImageEnvironmentSub<B> {
                 camera_position,
                 point_light_count: 0,
                 directional_light_count: 0,
+                shadow_count: 0,
                 spot_light_count: 0,
             }
             .std140();
+
+            let shadow_count_ref = &mut env.shadow_count;
 
             let (lights, transforms) =
                 <(ReadStorage<'_, Light>, ReadStorage<'_, Transform>)>::fetch(world);
@@ -247,6 +290,24 @@ impl<B: Backend> PerImageEnvironmentSub<B> {
                 })
                 .take(MAX_SPOT_LIGHTS);
 
+            let dir_shadows = lights.join().filter_map(|light| match light {
+                Light::Directional(ref light) if light.cast_shadow => {
+                    let eye = Point3::new(0.0, 0.0, 0.0);
+                    let target = eye + light.direction;
+                    let light_view = Matrix4::<f32>::look_at_rh(&eye, &target, &Vector3::y());
+                    let light_proj = Orthographic::new(-20.0, 20.0, -20.0, 20.0, -200.0, 200.0)
+                        .as_matrix()
+                        .clone();
+                    let view_to_light = (light_proj * light_view);
+
+                    let view_to_light: [[f32; 4]; 4] = view_to_light.into();
+                    Some(pod::ShadowData {
+                        view_to_light: view_to_light.into(),
+                    })
+                }
+                _ => None,
+            });
+
             use util::{usize_range, write_into_slice};
             write_into_slice(
                 &mut dst_slice[usize_range(plight_range)],
@@ -259,6 +320,10 @@ impl<B: Backend> PerImageEnvironmentSub<B> {
             write_into_slice(
                 &mut dst_slice[usize_range(slight_range)],
                 spot_lights.tap_count(&mut env.spot_light_count),
+            );
+            write_into_slice(
+                &mut dst_slice[usize_range(shadow_range)],
+                dir_shadows.tap_count(&mut env.shadow_count),
             );
             write_into_slice(&mut dst_slice[usize_range(projview_range)], Some(projview));
             write_into_slice(&mut dst_slice[usize_range(env_range)], Some(env));

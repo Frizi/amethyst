@@ -21,7 +21,11 @@ type Std140<T> = <T as AsStd140>::Std140;
 pub struct CameraGatherer {
     /// Fetched camera world position
     pub camera_position: vec3,
-    /// Fetched camera projection matrix.
+    /// Fetched camera projection matrix
+    pub camera_proj: Matrix4<f32>,
+    /// Fetched camera view matrix
+    pub camera_view: Matrix4<f32>,
+    /// ViewArgs with camera projection and view matrix.
     pub projview: Std140<pod::ViewArgs>,
 }
 
@@ -62,18 +66,14 @@ impl CameraGatherer {
         let camera_position =
             convert::<_, Vector3<f32>>(transform.global_matrix().column(3).xyz()).into_pod();
 
-        let proj: [[f32; 4]; 4] = (*camera.as_matrix()).into();
-        let view: [[f32; 4]; 4] = convert::<_, Matrix4<f32>>(transform.global_view_matrix()).into();
-
-        let projview = pod::ViewArgs {
-            proj: proj.into(),
-            view: view.into(),
-        }
-        .std140();
+        let camera_proj = *camera.as_matrix();
+        let camera_view = transform.global_view_matrix();
 
         Self {
             camera_position,
-            projview,
+            camera_proj,
+            camera_view,
+            projview: pod::ViewArgs::from_matrices(camera_proj, camera_view).std140(),
         }
     }
 }

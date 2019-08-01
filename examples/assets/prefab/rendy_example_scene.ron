@@ -9,6 +9,21 @@ Prefab (
     entities: [
         (
             data: (
+                transform: (
+                    translation: (0.0, 0.0, 0.0),
+                ),
+                light: (
+                    light: Directional((
+                        intensity: 2.0,
+                        color: (1.0, 0.9, 0.8),
+                        direction: [0.0, -1.0, -0.3],
+                        cast_shadow: true,
+                    )),
+                ),
+            ),
+        ),
+        (
+            data: (
                 sprite_sheet: Sheet(
                     texture: File("texture/bat_semi_transparent.png", (
                         "IMAGE", (
@@ -795,7 +810,7 @@ Prefab (
         (
             data: (
                 transform: (
-                    translation: (0.0, -11.0, 0.0),
+                    translation: (0.0, -2.0, 0.0),
                     scale: (15.0, 15.0, 15.0),
                     rotation: (-0.7071068, 0, 0, 0.7071068),
                 ),
