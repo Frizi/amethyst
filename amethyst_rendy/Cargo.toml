@@ -26,7 +26,8 @@ lazy_static = "1.3"
 log = "0.4"
 palette = { version = "0.4", features = ["serde"] }
 # rendy = { version = "^0.3.2", default-features = false, features = ["base", "mesh-obj", "texture-image", "texture-palette", "serde-1"] }
-rendy = { version = "^0.3.2", path = "../../rendy/rendy", default-features = false, features = ["base", "mesh-obj", "texture-image", "texture-palette", "serde-1"] }
+# rendy = { version = "^0.3.2", path = "../../rendy/rendy", default-features = false, features = ["base", "mesh-obj", "texture-image", "texture-palette", "serde-1"] }
+rendy = { git = "https://github.com/frizi/rendy.git", branch = "shadow-map", default-features = false, features = ["base", "mesh-obj", "texture-image", "texture-palette", "serde-1"] }
 ron = "0.5"
 serde = { version = "1", features = ["serde_derive"] }
 fnv = "1"

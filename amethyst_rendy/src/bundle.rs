@@ -206,7 +206,7 @@ impl<B: Backend> RenderPlan<B> {
                 .filter_map(|(k, t)| unsafe { t.metadata(factory.physical()) }.map(|m| (*k, m)))
                 .collect(),
             targets: self.targets,
-            passes: Default::default(),
+            evaluations: Default::default(),
             outputs: Default::default(),
             graph_builder: GraphBuilder::new(),
         };
@@ -248,23 +248,23 @@ pub struct TargetMetadata {
 }
 
 #[derive(Debug)]
-struct PlanContext<B: Backend> {
+pub struct PlanContext<B: Backend> {
     targets: HashMap<Target, TargetPlan<B>>,
     target_metadata: HashMap<Target, TargetMetadata>,
-    passes: HashMap<Target, EvaluationState>,
+    evaluations: HashMap<Target, EvaluationState>,
     outputs: HashMap<TargetImage, ImageId>,
     graph_builder: GraphBuilder<B, World>,
 }
 
 impl<B: Backend> PlanContext<B> {
     pub fn mark_evaluating(&mut self, target: Target) -> Result<(), Error> {
-        match self.passes.get(&target) {
+        match self.evaluations.get(&target) {
             None => {},
             Some(EvaluationState::Evaluating) => return Err(format_err!("Trying to evaluate {:?} render plan that is already evaluating. Circular dependency detected.", target)),
             // this case is not a soft runtime error, as this should never be allowed by the API.
             Some(EvaluationState::Built(_)) => panic!("Trying to reevaluate a render plan for {:?}.", target),
         };
-        self.passes.insert(target, EvaluationState::Evaluating);
+        self.evaluations.insert(target, EvaluationState::Evaluating);
         Ok(())
     }
 
@@ -276,12 +276,8 @@ impl<B: Backend> PlanContext<B> {
         Ok(())
     }
 
-    fn submit_pass(
-        &mut self,
-        target: Target,
-        pass: RenderPassNodeBuilder<B, World>,
-    ) -> Result<(), Error> {
-        match self.passes.get(&target) {
+    fn submit_target(&mut self, target: Target, node: NodeId) {
+        match self.evaluations.get(&target) {
             None => {}
             Some(EvaluationState::Evaluating) => {}
             // this case is not a soft runtime error, as this should never be allowed by the API.
@@ -290,22 +286,21 @@ impl<B: Backend> PlanContext<B> {
                 target
             ),
         };
-        let node = self.graph_builder.add_node(pass);
-        self.passes.insert(target, EvaluationState::Built(node));
-        Ok(())
+        self.evaluations
+            .insert(target, EvaluationState::Built(node));
     }
 
-    fn get_pass_node_raw(&self, target: Target) -> Option<NodeId> {
-        self.passes.get(&target).and_then(|p| p.node())
+    fn get_target_node_raw(&self, target: Target) -> Option<NodeId> {
+        self.evaluations.get(&target).and_then(|p| p.node())
     }
 
     pub fn get_node(&mut self, target: Target) -> Result<NodeId, Error> {
-        match self.get_pass_node_raw(target) {
+        match self.get_target_node_raw(target) {
             Some(node) => Ok(node),
             None => {
                 self.evaluate_target(target)?;
                 Ok(self
-                    .passes
+                    .evaluations
                     .get(&target)
                     .and_then(|p| p.node())
                     .expect("Just built"))
@@ -317,7 +312,7 @@ impl<B: Backend> PlanContext<B> {
         self.target_metadata.get(&target).copied()
     }
 
-    fn get_image(&mut self, image_ref: TargetImage) -> Result<ImageId, Error> {
+    pub fn get_image(&mut self, image_ref: TargetImage) -> Result<ImageId, Error> {
         self.try_get_image(image_ref)?.ok_or_else(|| {
             format_err!(
                 "Output image {:?} is not registered by the target.",
@@ -326,9 +321,9 @@ impl<B: Backend> PlanContext<B> {
         })
     }
 
-    fn try_get_image(&mut self, image_ref: TargetImage) -> Result<Option<ImageId>, Error> {
+    pub fn try_get_image(&mut self, image_ref: TargetImage) -> Result<Option<ImageId>, Error> {
         if !self
-            .passes
+            .evaluations
             .get(&image_ref.target())
             .map_or(false, |t| t.is_built())
         {
@@ -337,7 +332,7 @@ impl<B: Backend> PlanContext<B> {
         Ok(self.outputs.get(&image_ref).cloned())
     }
 
-    fn register_output(&mut self, output: TargetImage, image: ImageId) -> Result<(), Error> {
+    pub fn register_output(&mut self, output: TargetImage, image: ImageId) -> Result<(), Error> {
         if self.outputs.contains_key(&output) {
             return Err(format_err!(
                 "Trying to register already registered output image {:?}",
@@ -359,13 +354,19 @@ impl<B: Backend> PlanContext<B> {
 }
 
 /// A planning context focused on specific render target.
-#[derive(Debug)]
+#[derive(derivative::Derivative)]
+#[derivative(Debug(bound = ""))]
 pub struct TargetPlanContext<'a, B: Backend> {
     plan_context: &'a mut PlanContext<B>,
     key: Target,
     colors: usize,
     depth: bool,
     actions: Vec<(i32, RenderableAction<B>)>,
+    #[derivative(Debug = "ignore")]
+    post_mods: Vec<(
+        i32,
+        Box<dyn FnOnce(&mut PlanContext<B>, NodeId) -> Result<NodeId, Error>>,
+    )>,
     deps: Vec<NodeId>,
 }
 
@@ -395,6 +396,14 @@ impl<'a, B: Backend> TargetPlanContext<'a, B> {
         Ok(())
     }
 
+    pub fn add_post(
+        &mut self,
+        order: impl Into<i32>,
+        post_mod: impl FnOnce(&mut PlanContext<B>, NodeId) -> Result<NodeId, Error> + 'static,
+    ) {
+        self.post_mods.push((order.into(), Box::new(post_mod)));
+    }
+
     /// Get number of color outputs of current render target.
     pub fn colors(&self) -> usize {
         self.colors
@@ -413,12 +422,18 @@ impl<'a, B: Backend> TargetPlanContext<'a, B> {
         self.plan_context.get_image(image).map(|i| {
             let node = self
                 .plan_context
-                .get_pass_node_raw(image.target())
+                .get_target_node_raw(image.target())
                 .expect("Image without target node");
             self.add_dep(node);
             i
         })
     }
+
+    /// Create new local image
+    pub fn create_image(&mut self, options: ImageOptions) -> ImageId {
+        self.plan_context.create_image(options)
+    }
+
     /// Retrieve an image produced by other render target.
     /// Returns `None` when such image isn't registered.
     ///
@@ -428,7 +443,7 @@ impl<'a, B: Backend> TargetPlanContext<'a, B> {
             i.map(|i| {
                 let node = self
                     .plan_context
-                    .get_pass_node_raw(image.target())
+                    .get_target_node_raw(image.target())
                     .expect("Image without target node");
                 self.add_dep(node);
                 i
@@ -613,6 +628,7 @@ impl<B: Backend> TargetPlan<B> {
             actions: vec![],
             colors: outputs.colors.len(),
             depth: outputs.depth.is_some(),
+            post_mods: vec![],
             deps: vec![],
         };
 
@@ -621,13 +637,18 @@ impl<B: Backend> TargetPlan<B> {
         }
 
         let TargetPlanContext {
-            mut actions, deps, ..
+            mut actions,
+            mut post_mods,
+            deps,
+            ..
         } = target_ctx;
+
+        actions.sort_by_key(|a| a.0);
+        post_mods.sort_by_key(|a| a.0);
 
         let mut subpass = SubpassBuilder::new();
         let mut pass = RenderPassNodeBuilder::new();
 
-        actions.sort_by_key(|a| a.0);
         for action in actions.drain(..).map(|a| a.1) {
             match action {
                 RenderableAction::RenderGroup(group) => {
@@ -661,7 +682,13 @@ impl<B: Backend> TargetPlan<B> {
         }
 
         pass.add_subpass(subpass);
-        ctx.submit_pass(self.key, pass)?;
+
+        let node = ctx.graph().add_node(pass);
+        let node = post_mods
+            .into_iter()
+            .fold(Ok(node), |node, (_, post_mod)| post_mod(ctx, node?))?;
+
+        ctx.submit_target(self.key, node);
         Ok(())
     }
 }
@@ -750,9 +777,10 @@ pub enum Target {
     /// Default render target for most operations.
     /// Usually the one that gets presented to the window.
     Main,
-    /// Render target for shadow mapping.
-    /// Builtin plugins use cascaded shadow maps.
-    ShadowMap,
+    /// Render target for depth used for shadow mapping.
+    ShadowMapDepth,
+    /// Render target for filtered EVSM data for shadow mapping.
+    ShadowMapEvsm,
     /// Custom render target identifier.
     Custom(&'static str),
 }
@@ -948,6 +976,154 @@ mod tests {
                         .with_depth_stencil(depth),
                 )
                 .with_surface(surface2, None),
+        );
+
+        assert_eq!(
+            format!("{:?}", planned_graph),
+            format!("{:?}", manual_graph)
+        );
+    }
+
+    #[test]
+    #[ignore] // CI can't run tests requiring actual backend
+    fn transitive_dependency() {
+        let config: rendy::factory::Config = Default::default();
+        let (factory, families): (Factory<DefaultBackend>, _) =
+            rendy::factory::init(config).unwrap();
+        let mut plan = RenderPlan::<DefaultBackend>::new();
+
+        let kind = crate::Kind::D2(1920, 1080, 1, 1);
+        plan.add_root(Target::Main);
+        plan.define_pass(
+            Target::Main,
+            TargetPlanOutputs {
+                colors: vec![OutputColor::Image(ImageOptions {
+                    kind,
+                    levels: 1,
+                    format: Format::Rgb8Unorm,
+                    clear: None,
+                })],
+                depth: Some(ImageOptions {
+                    kind,
+                    levels: 1,
+                    format: Format::D32Sfloat,
+                    clear: Some(ClearValue::DepthStencil(ClearDepthStencil(1.0, 0))),
+                }),
+            },
+        )
+        .unwrap();
+
+        plan.define_pass(
+            Target::Custom("target2"),
+            TargetPlanOutputs {
+                colors: vec![OutputColor::Image(ImageOptions {
+                    kind,
+                    levels: 1,
+                    format: Format::Rgb8Unorm,
+                    clear: None,
+                })],
+                depth: Some(ImageOptions {
+                    kind,
+                    levels: 1,
+                    format: Format::D32Sfloat,
+                    clear: Some(ClearValue::DepthStencil(ClearDepthStencil(1.0, 0))),
+                }),
+            },
+        )
+        .unwrap();
+
+        plan.define_pass(
+            Target::Custom("target3"),
+            TargetPlanOutputs {
+                colors: vec![OutputColor::Image(ImageOptions {
+                    kind,
+                    levels: 1,
+                    format: Format::Rgb8Unorm,
+                    clear: None,
+                })],
+                depth: Some(ImageOptions {
+                    kind,
+                    levels: 1,
+                    format: Format::D32Sfloat,
+                    clear: Some(ClearValue::DepthStencil(ClearDepthStencil(1.0, 0))),
+                }),
+            },
+        )
+        .unwrap();
+
+        plan.extend_target(Target::Main, |ctx| {
+            let _img = ctx.get_image(TargetImage::Color(Target::Custom("target2"), 0));
+            ctx.add(RenderOrder::Transparent, TestGroup1.builder())?;
+            ctx.add(RenderOrder::Opaque, TestGroup2.builder())?;
+            Ok(())
+        });
+
+        plan.extend_target(Target::Custom("target2"), |ctx| {
+            let _img = ctx.get_image(TargetImage::Color(Target::Custom("target3"), 0));
+            ctx.add(RenderOrder::Transparent, TestGroup1.builder())?;
+            ctx.add(RenderOrder::Opaque, TestGroup2.builder())?;
+            Ok(())
+        });
+
+        plan.extend_target(Target::Custom("target3"), |ctx| {
+            ctx.add(RenderOrder::Transparent, TestGroup1.builder())?;
+            ctx.add(RenderOrder::Opaque, TestGroup2.builder())?;
+            Ok(())
+        });
+        let planned_graph = plan.build(&factory).unwrap();
+
+        let mut manual_graph = GraphBuilder::<DefaultBackend, Resources>::new();
+        let color0 = manual_graph.create_image(kind, 1, Format::Rgb8Unorm, None);
+        let depth0 = manual_graph.create_image(
+            kind,
+            1,
+            Format::D32Sfloat,
+            Some(ClearValue::DepthStencil(ClearDepthStencil(1.0, 0))),
+        );
+        let color1 = manual_graph.create_image(kind, 1, Format::Rgb8Unorm, None);
+        let depth1 = manual_graph.create_image(
+            kind,
+            1,
+            Format::D32Sfloat,
+            Some(ClearValue::DepthStencil(ClearDepthStencil(1.0, 0))),
+        );
+        let color2 = manual_graph.create_image(kind, 1, Format::Rgb8Unorm, None);
+        let depth2 = manual_graph.create_image(
+            kind,
+            1,
+            Format::D32Sfloat,
+            Some(ClearValue::DepthStencil(ClearDepthStencil(1.0, 0))),
+        );
+        let target3 = manual_graph.add_node(
+            RenderPassNodeBuilder::new().with_subpass(
+                SubpassBuilder::new()
+                    .with_group(TestGroup2.builder())
+                    .with_group(TestGroup1.builder())
+                    .with_color(color0)
+                    .with_depth_stencil(depth0),
+            ),
+        );
+
+        let target2 = manual_graph.add_node(
+            RenderPassNodeBuilder::new().with_subpass(
+                SubpassBuilder::new()
+                    .with_group(TestGroup2.builder())
+                    .with_group(TestGroup1.builder())
+                    .with_color(color1)
+                    .with_depth_stencil(depth1)
+                    .with_dependency(target3),
+            ),
+        );
+
+        let main_node = manual_graph.add_node(
+            RenderPassNodeBuilder::new().with_subpass(
+                SubpassBuilder::new()
+                    .with_group(TestGroup2.builder())
+                    .with_group(TestGroup1.builder())
+                    .with_color(color2)
+                    .with_depth_stencil(depth2)
+                    .with_dependency(target2),
+            ),
         );
 
         assert_eq!(

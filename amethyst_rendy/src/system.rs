@@ -293,7 +293,7 @@ fn create_default_mat<B: Backend>(world: &mut World) -> Material {
     let cavity = loader.load_from_data(cavity.into(), (), &tex_storage);
 
     Material {
-        alpha_cutoff: 0.01,
+        alpha_cutoff: 0.0,
         albedo,
         emission,
         normal,

@@ -9,11 +9,10 @@ use crate::{
     transparent::Transparent,
     types::{Backend, Mesh},
     util,
-    visibility::Visibility,
 };
 use amethyst_assets::{AssetStorage, Handle};
 use amethyst_core::{
-    ecs::{Join, Read, ReadExpect, ReadStorage, SystemData, World},
+    ecs::{Join, Read, ReadStorage, SystemData, World},
     math::{convert, Matrix4, Point3, Vector3},
     transform::Transform,
     Hidden, HiddenPropagate,
@@ -175,8 +174,8 @@ impl<B: Backend> RenderGroup<B, World> for DrawShadows3D<B> {
             let light_proj = Orthographic::new(-20.0, 20.0, -20.0, 20.0, -200.0, 200.0)
                 .as_matrix()
                 .clone();
-            let projview = ViewArgs::from_matrices(light_proj, light_view);
-            self.env.write(factory, index, projview.std140());
+            let viewargs = ViewArgs::from_separate_matrices(light_proj, light_view);
+            self.env.write(factory, index, viewargs.std140());
         } else {
             return PrepareResult::DrawRecord;
         };
@@ -362,7 +361,7 @@ fn build_pipelines<B: Backend>(
         .chain(Some((Model::vertex(), pso::VertexInputRate::Instance(1))))
         .collect::<Vec<_>>();
 
-    let shader_vertex = unsafe { super::SHADOW_VERTEX.module(factory).unwrap() };
+    let shader_vertex = unsafe { super::SIMPLE_MESH_VERTEX.module(factory).unwrap() };
     let pipe_desc = PipelineDescBuilder::new()
         .with_vertex_desc(&vertex_desc)
         .with_shaders(util::simple_shader_set(&shader_vertex, None))
@@ -370,10 +369,17 @@ fn build_pipelines<B: Backend>(
         .with_subpass(subpass)
         .with_framebuffer_size(framebuffer_width, framebuffer_height)
         .with_face_culling(pso::Face::BACK)
-        .with_depth_test(pso::DepthTest::On {
+        .with_multisampling(Some(pso::Multisampling {
+            rasterization_samples: 4,
+            sample_shading: None,
+            sample_mask: !0,
+            alpha_coverage: false,
+            alpha_to_one: false,
+        }))
+        .with_depth_test(Some(pso::DepthTest {
             fun: pso::Comparison::Less,
             write: true,
-        });
+        }));
 
     // let pipelines = if skinning {
     //     let shader_vertex_skinned = unsafe { T::vertex_skinned_shader().module(factory).unwrap() };

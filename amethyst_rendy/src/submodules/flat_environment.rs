@@ -36,8 +36,8 @@ impl<B: Backend> FlatEnvironmentSub<B> {
     pub fn process(&mut self, factory: &Factory<B>, index: usize, world: &World) {
         #[cfg(feature = "profiler")]
         profile_scope!("process");
-        let projview = CameraGatherer::gather(world).projview;
-        self.uniform.write(factory, index, projview);
+        let viewargs = CameraGatherer::gather(world).viewargs;
+        self.uniform.write(factory, index, viewargs);
     }
 
     /// Binds this environment set for all images.

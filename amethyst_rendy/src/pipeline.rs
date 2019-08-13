@@ -214,12 +214,12 @@ impl<'a, B: Backend> PipelineDescBuilder<'a, B> {
     }
 
     /// Build with the provided `DepthTest`
-    pub fn with_depth_test(mut self, depth_test: DepthTest) -> Self {
+    pub fn with_depth_test(mut self, depth_test: Option<DepthTest>) -> Self {
         self.set_depth_test(depth_test);
         self
     }
     /// Set to use the provided `DepthTest`
-    pub fn set_depth_test(&mut self, depth_test: DepthTest) {
+    pub fn set_depth_test(&mut self, depth_test: Option<DepthTest>) {
         self.depth_stencil.depth = depth_test;
     }
 

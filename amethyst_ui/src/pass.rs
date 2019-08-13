@@ -14,7 +14,7 @@ use amethyst_error::Error;
 use amethyst_rendy::{
     batch::OrderedOneLevelBatch,
     bundle::{RenderOrder, RenderPlan, RenderPlugin, Target},
-    palette,
+    define_shaders, palette,
     pipeline::{PipelineDescBuilder, PipelinesBuilder},
     rendy::{
         command::{QueueId, RenderPassEncoder},
@@ -27,10 +27,10 @@ use amethyst_rendy::{
             self,
             device::Device,
             format::Format,
-            pso::{self, ShaderStageFlags},
+            pso,
         },
         mesh::{AsVertex, VertexFormat},
-        shader::{Shader, SpirvShader},
+        shader::Shader,
         texture::palette::load_from_srgba,
     },
     resources::Tint,
@@ -114,20 +114,6 @@ impl AsVertex for UiArgs {
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd, AsStd140)]
 struct UiViewArgs {
     inverse_window_size: vec2,
-}
-
-lazy_static::lazy_static! {
-    static ref UI_VERTEX: SpirvShader = SpirvShader::new(
-        include_bytes!("../compiled/ui.vert.spv").to_vec(),
-        ShaderStageFlags::VERTEX,
-        "main",
-    );
-
-    static ref UI_FRAGMENT: SpirvShader = SpirvShader::new(
-        include_bytes!("../compiled/ui.frag.spv").to_vec(),
-        ShaderStageFlags::FRAGMENT,
-        "main",
-    );
 }
 
 /// A UI drawing pass that draws UI elements and text in screen-space
@@ -480,6 +466,11 @@ impl<B: Backend> RenderGroup<B, World> for DrawUi<B> {
     }
 }
 
+define_shaders! {
+    static ref UI_VERTEX <- "../compiled/ui.vert.spv";
+    static ref UI_FRAGMENT <- "../compiled/ui.frag.spv";
+}
+
 fn build_ui_pipeline<B: Backend>(
     factory: &Factory<B>,
     subpass: hal::pass::Subpass<'_, B>,
@@ -505,10 +496,10 @@ fn build_ui_pipeline<B: Backend>(
                 .with_layout(&pipeline_layout)
                 .with_subpass(subpass)
                 .with_framebuffer_size(framebuffer_width, framebuffer_height)
-                .with_blend_targets(vec![pso::ColorBlendDesc(
-                    pso::ColorMask::ALL,
-                    pso::BlendState::ALPHA,
-                )]),
+                .with_blend_targets(vec![pso::ColorBlendDesc {
+                    mask: pso::ColorMask::ALL,
+                    blend: Some(pso::BlendState::ALPHA),
+                }]),
         )
         .build(factory, None);
 

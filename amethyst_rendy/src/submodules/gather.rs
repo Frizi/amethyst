@@ -25,8 +25,10 @@ pub struct CameraGatherer {
     pub camera_proj: Matrix4<f32>,
     /// Fetched camera view matrix
     pub camera_view: Matrix4<f32>,
-    /// ViewArgs with camera projection and view matrix.
-    pub projview: Std140<pod::ViewArgs>,
+    /// ProjView uniform with camera projection and view matrix.
+    pub projview: Std140<pod::ProjView>,
+    /// ViewArgs uniform with combined world to view matrix.
+    pub viewargs: Std140<pod::ViewArgs>,
 }
 
 impl CameraGatherer {
@@ -73,7 +75,8 @@ impl CameraGatherer {
             camera_position,
             camera_proj,
             camera_view,
-            projview: pod::ViewArgs::from_matrices(camera_proj, camera_view).std140(),
+            viewargs: pod::ViewArgs::from_separate_matrices(camera_proj, camera_view).std140(),
+            projview: pod::ProjView::from_separate_matrices(camera_proj, camera_view).std140(),
         }
     }
 }

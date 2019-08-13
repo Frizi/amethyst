@@ -13,10 +13,10 @@ use amethyst::{
     core::{
         ecs::{
             Component, DenseVecStorage, DispatcherBuilder, Entities, Entity, Join, Read,
-            ReadExpect, ReadStorage, System, SystemData, World, Write, WriteStorage,
+            ReadStorage, System, SystemData, World, Write, WriteStorage,
         },
         math::{Unit, UnitQuaternion, Vector3},
-        SystemDesc, Time, Transform, TransformBundle,
+        Time, Transform, TransformBundle,
     },
     error::Error,
     gltf::GltfSceneLoaderSystemDesc,
@@ -166,9 +166,9 @@ impl SimpleState for Example {
         };
 
         println!("Create spheres");
-        const NUM_ROWS: usize = 15;
-        const NUM_COLS: usize = 15;
-        const NUM_PLANES: usize = 2;
+        const NUM_ROWS: usize = 2;
+        const NUM_COLS: usize = 2;
+        const NUM_PLANES: usize = 1;
 
         let mut mtls = Vec::with_capacity(100);
 
@@ -211,10 +211,8 @@ impl SimpleState for Example {
                 for j in 0..NUM_ROWS {
                     let x = i as f32 / (NUM_COLS - 1) as f32;
                     let y = j as f32 / (NUM_ROWS - 1) as f32;
-                    let z = k as f32 / (NUM_PLANES - 1) as f32;
 
-                    let center =
-                        Vector3::new(15.0 * (x - 0.5), 15.0 * (y - 0.5), 2.0 * (z - 0.5) - 5.0);
+                    let center = Vector3::new(15.0 * (x - 0.5), 15.0 * (y - 0.5), 4.0 + k as f32);
 
                     let mut pos = Transform::default();
                     pos.set_translation(center);
@@ -229,13 +227,13 @@ impl SimpleState for Example {
                         .with(BoundingSphere::origin(1.0))
                         .with(Orbit {
                             axis: Unit::new_normalize(Vector3::y()),
-                            time_scale: 5.0 + y + 0.1 * x + 0.07 * z,
+                            time_scale: 5.0 + y + 0.1 * x + 0.07 * k as f32,
                             center,
                             radius: 0.2,
                         });
 
                     // add some visible tint pattern
-                    if i > 10 && j > 10 && i < NUM_COLS - 10 && j < NUM_ROWS - 10 {
+                    if i > 10 && j > 10 && NUM_COLS - i > 10 && NUM_COLS - j > 10 {
                         let xor_x = i - 10;
                         let xor_y = j - 10;
                         let c = ((xor_x ^ xor_y) & 0xFF) as f32 / 255.0;
@@ -544,7 +542,7 @@ fn main() -> amethyst::Result<()> {
     amethyst::Logger::from_config(amethyst::LoggerConfig {
         stdout: amethyst::StdoutLog::Off,
         log_file: Some("rendy_example.log".into()),
-        level_filter: log::LevelFilter::Debug,
+        level_filter: log::LevelFilter::Trace,
         ..Default::default()
     })
     // .level_for("amethyst_utils::fps_counter", log::LevelFilter::Debug)

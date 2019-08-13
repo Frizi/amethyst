@@ -66,6 +66,7 @@ pub mod error;
 pub mod formats;
 pub mod light;
 pub mod mtl;
+pub mod nodes;
 pub mod pipeline;
 pub mod plugins;
 pub mod resources;
@@ -120,3 +121,7 @@ pub mod loaders {
 
     pub use rendy::texture::palette::{load_from_linear_rgba, load_from_srgb, load_from_srgba};
 }
+
+// used in public macros
+#[doc(hidden)]
+pub use lazy_static;

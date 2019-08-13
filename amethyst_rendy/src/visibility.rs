@@ -2,12 +2,15 @@
 use crate::{
     camera::{ActiveCamera, Camera},
     transparent::Transparent,
+    Material, Mesh,
 };
+use amethyst_assets::{AssetStorage, Handle};
 use amethyst_core::{
     ecs::{
         hibitset::BitSet,
         prelude::{
-            Component, DenseVecStorage, Entities, Entity, Join, Read, ReadStorage, System, Write,
+            Component, DenseVecStorage, Entities, Entity, Join, Read, ReadStorage, System,
+            SystemData, Write,
         },
     },
     math::{convert, distance_squared, Matrix4, Point3, Vector4},
@@ -15,7 +18,7 @@ use amethyst_core::{
 };
 
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
+use std::{cmp::Ordering, marker::PhantomData};
 
 #[cfg(feature = "profiler")]
 use thread_profiler::profile_scope;
@@ -232,4 +235,264 @@ impl Frustum {
         }
         true
     }
+}
+
+pub trait VisibilityDef<'a>: Default + 'static + Send + Sync {
+    type SystemData: SystemData<'a>;
+
+    fn join<J: Join, T>(
+        data: Self::SystemData,
+        ext_join: J,
+        iter: impl FnMut(J::Type) -> Option<T>,
+    ) -> Vec<T>;
+
+    fn depth_sort() -> bool {
+        false
+    }
+
+    fn set_entities(&mut self, entities: Vec<Entity>);
+    fn entities(&self) -> &Vec<Entity>;
+}
+
+#[derive(Debug)]
+pub struct Viewport {
+    view: Matrix4<f32>,
+    projection: Matrix4<f32>,
+    position: Point3<f32>,
+    frustum: Frustum,
+}
+
+pub trait ViewportProvider<'a>: 'static + Send + Sync {
+    type SystemData: SystemData<'a>;
+    fn viewport(res: Self::SystemData) -> Viewport;
+}
+
+#[derive(Debug, Default)]
+pub struct MainCameraViewportProvider;
+
+impl<'a> ViewportProvider<'a> for MainCameraViewportProvider {
+    type SystemData = (
+        Entities<'a>,
+        ReadStorage<'a, Transform>,
+        Read<'a, ActiveCamera>,
+        ReadStorage<'a, Camera>,
+    );
+
+    fn viewport((entities, transforms, active, cameras): Self::SystemData) -> Viewport {
+        let origin = Point3::origin();
+        let defcam = Camera::standard_2d(1.0, 1.0);
+        let identity = Transform::default();
+
+        let mut camera_join = (&cameras, &transforms).join();
+        let (camera, camera_transform) = active
+            .entity
+            .and_then(|a| camera_join.get(a, &entities))
+            .or_else(|| camera_join.next())
+            .unwrap_or((&defcam, &identity));
+
+        let position = camera_transform.global_matrix().transform_point(&origin);
+        let frustum = Frustum::new(
+            convert::<_, Matrix4<f32>>(*camera.as_matrix())
+                * camera_transform.global_matrix().try_inverse().unwrap(),
+        );
+        let projection = *camera.as_matrix();
+        let view = camera_transform.global_view_matrix();
+
+        Viewport {
+            view,
+            projection,
+            position,
+            frustum,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct VisOpaque(Vec<Entity>);
+
+impl<'a> VisibilityDef<'a> for VisOpaque {
+    type SystemData = (
+        ReadStorage<'a, Handle<Mesh>>,
+        ReadStorage<'a, Handle<Material>>,
+        ReadStorage<'a, Transparent>,
+        Read<'a, AssetStorage<Material>>,
+    );
+
+    fn join<J: Join, T>(
+        data: Self::SystemData,
+        ext_join: J,
+        mut iter: impl FnMut(J::Type) -> Option<T>,
+    ) -> Vec<T> {
+        let (meshes, materials, transparents, mat_storage) = data;
+
+        (ext_join, (&meshes, &materials, !&transparents))
+            .join()
+            .filter(|(_, (_, material, _))| {
+                mat_storage
+                    .get(material)
+                    .map_or(false, |m| m.alpha_cutoff == 0.0)
+            })
+            .filter_map(|j| iter(j.0))
+            .collect()
+    }
+
+    fn set_entities(&mut self, entities: Vec<Entity>) {
+        self.0 = entities;
+    }
+
+    fn entities(&self) -> &Vec<Entity> {
+        &self.0
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct VisOpaqueCutoff(Vec<Entity>);
+
+impl<'a> VisibilityDef<'a> for VisOpaqueCutoff {
+    type SystemData = (
+        ReadStorage<'a, Handle<Mesh>>,
+        ReadStorage<'a, Handle<Material>>,
+        ReadStorage<'a, Transparent>,
+        Read<'a, AssetStorage<Material>>,
+    );
+
+    fn join<J: Join, T>(
+        data: Self::SystemData,
+        ext_join: J,
+        mut iter: impl FnMut(J::Type) -> Option<T>,
+    ) -> Vec<T> {
+        let (meshes, materials, transparents, mat_storage) = data;
+
+        (ext_join, (&meshes, &materials, !&transparents))
+            .join()
+            .filter(|(_, (_, material, _))| {
+                mat_storage
+                    .get(material)
+                    .map_or(false, |m| m.alpha_cutoff > 0.0)
+            })
+            .filter_map(|j| iter(j.0))
+            .collect()
+    }
+
+    fn set_entities(&mut self, entities: Vec<Entity>) {
+        self.0 = entities;
+    }
+
+    fn entities(&self) -> &Vec<Entity> {
+        &self.0
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct VisTransparent(Vec<Entity>);
+
+impl<'a> VisibilityDef<'a> for VisTransparent {
+    type SystemData = (
+        ReadStorage<'a, Handle<Mesh>>,
+        ReadStorage<'a, Handle<Material>>,
+        ReadStorage<'a, Transparent>,
+    );
+
+    fn join<J: Join, T>(
+        data: Self::SystemData,
+        ext_join: J,
+        mut iter: impl FnMut(J::Type) -> Option<T>,
+    ) -> Vec<T> {
+        let (meshes, materials, transparents) = data;
+
+        (ext_join, (&meshes, &materials, &transparents))
+            .join()
+            .filter_map(|j| iter(j.0))
+            .collect()
+    }
+
+    fn set_entities(&mut self, entities: Vec<Entity>) {
+        self.0 = entities;
+    }
+
+    fn entities(&self) -> &Vec<Entity> {
+        &self.0
+    }
+
+    fn depth_sort() -> bool {
+        true
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct FrustumCullingSystem<D, V = MainCameraViewportProvider> {
+    marker: PhantomData<(D, V)>,
+}
+
+impl<'a, D, V> System<'a> for FrustumCullingSystem<D, V>
+where
+    D: VisibilityDef<'a>,
+    V: ViewportProvider<'a>,
+{
+    type SystemData = (
+        Entities<'a>,
+        ReadStorage<'a, Transform>,
+        ReadStorage<'a, BoundingSphere>,
+        ReadStorage<'a, Hidden>,
+        ReadStorage<'a, HiddenPropagate>,
+        Write<'a, D>,
+        V::SystemData,
+        D::SystemData,
+    );
+    fn run(&mut self, data: Self::SystemData) {
+        let (entities, transform, bound, hidden, hidden_prop, mut visibility, view_data, vis_data) =
+            data;
+        let Viewport {
+            frustum, position, ..
+        } = V::viewport(view_data);
+
+        let ext_join = (
+            &*entities,
+            &transform,
+            bound.maybe(),
+            !&hidden,
+            !&hidden_prop,
+        );
+
+        let entities = if D::depth_sort() {
+            let mut data = D::join(vis_data, ext_join, |(entity, transform, sphere, _, _)| {
+                if cull_sphere(transform, sphere, &frustum) {
+                    Some((
+                        entity,
+                        distance_squared(&position, &centroid(transform, sphere)),
+                    ))
+                } else {
+                    None
+                }
+            });
+            data.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+            data.into_iter().map(|d| d.0).collect()
+        } else {
+            D::join(vis_data, ext_join, |(entity, transform, sphere, _, _)| {
+                if cull_sphere(transform, sphere, &frustum) {
+                    Some(entity)
+                } else {
+                    None
+                }
+            })
+        };
+
+        visibility.set_entities(entities);
+    }
+}
+
+#[inline]
+fn centroid(transform: &Transform, sphere: Option<&BoundingSphere>) -> Point3<f32> {
+    let matrix = transform.global_matrix();
+    matrix.transform_point(sphere.map_or(&Point3::origin(), |s| &s.center))
+}
+
+#[inline]
+fn cull_sphere(transform: &Transform, sphere: Option<&BoundingSphere>, frustum: &Frustum) -> bool {
+    let matrix = transform.global_matrix();
+    let centroid = centroid(&transform, sphere);
+    let radius: f32 =
+        sphere.map_or(1.0, |s| s.radius) * matrix[(0, 0)].max(matrix[(1, 1)]).max(matrix[(2, 2)]);
+
+    frustum.check_sphere(&centroid, radius)
 }

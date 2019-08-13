@@ -4,9 +4,10 @@ use crate::{
     bundle::{
         ImageOptions, OutputColor, RenderOrder, RenderPlan, RenderPlugin, Target, TargetImage,
     },
+    nodes::GenerateMips,
     pass::*,
     sprite_visibility::SpriteVisibilitySortingSystem,
-    visibility::VisibilitySortingSystem,
+    visibility::{FrustumCullingSystem, VisOpaque, VisOpaqueCutoff, VisTransparent},
     Backend, Factory, Format, Kind,
 };
 use amethyst_core::ecs::{DispatcherBuilder, World};
@@ -144,7 +145,10 @@ pub type RenderPbr3D = RenderBase3D<crate::pass::PbrPassDef>;
 #[derive(derivative::Derivative)]
 #[derivative(Default(bound = ""), Debug(bound = ""))]
 pub struct RenderBase3D<D: Base3DPassDef> {
+    #[derivative(Default(value = "Target::Main"))]
     target: Target,
+    #[derivative(Default(value = "TargetImage::Color(Target::ShadowMapEvsm, 0)"))]
+    shadow_map_image: TargetImage,
     skinning: bool,
     marker: std::marker::PhantomData<D>,
 }
@@ -153,6 +157,12 @@ impl<D: Base3DPassDef> RenderBase3D<D> {
     /// Set target to which 3d meshes will be rendered.
     pub fn with_target(mut self, target: Target) -> Self {
         self.target = target;
+        self
+    }
+
+    /// Set image from which shadow map is taken.
+    pub fn with_shadow_map(mut self, image: TargetImage) -> Self {
+        self.shadow_map_image = image;
         self
     }
 
@@ -171,7 +181,21 @@ impl<B: Backend, D: Base3DPassDef> RenderPlugin<B> for RenderBase3D<D> {
         world: &mut World,
         builder: &mut DispatcherBuilder<'a, 'b>,
     ) -> Result<(), Error> {
-        builder.add(VisibilitySortingSystem::new(), "visibility_system", &[]);
+        builder.add(
+            FrustumCullingSystem::<VisOpaque>::default(),
+            "cull_opaque",
+            &[],
+        );
+        builder.add(
+            FrustumCullingSystem::<VisOpaqueCutoff>::default(),
+            "cull_opaque_cutoff",
+            &[],
+        );
+        builder.add(
+            FrustumCullingSystem::<VisTransparent>::default(),
+            "cull_transparent",
+            &[],
+        );
         Ok(())
     }
 
@@ -182,8 +206,9 @@ impl<B: Backend, D: Base3DPassDef> RenderPlugin<B> for RenderBase3D<D> {
         _world: &World,
     ) -> Result<(), Error> {
         let skinning = self.skinning;
-        plan.extend_target(self.target, move |ctx| {
-            let shadow_map = ctx.try_get_image(TargetImage::Depth(Target::ShadowMap))?;
+        let shadow_map_image = self.shadow_map_image;
+        let shadow_map_target = plan.extend_target(self.target, move |ctx| {
+            let shadow_map = ctx.try_get_image(shadow_map_image)?;
 
             ctx.add(
                 RenderOrder::Opaque,
@@ -208,8 +233,10 @@ impl<B: Backend, D: Base3DPassDef> RenderPlugin<B> for RenderBase3D<D> {
 #[derive(derivative::Derivative)]
 #[derivative(Default(bound = ""), Debug(bound = ""))]
 pub struct RenderShadows3D {
-    #[derivative(Default(value = "Target::ShadowMap"))]
-    target: Target,
+    #[derivative(Default(value = "Target::ShadowMapDepth"))]
+    depth_target: Target,
+    #[derivative(Default(value = "Target::ShadowMapEvsm"))]
+    evsm_target: Target,
     skinning: bool,
 }
 
@@ -220,27 +247,69 @@ impl<B: Backend> RenderPlugin<B> for RenderShadows3D {
         _factory: &mut Factory<B>,
         _world: &World,
     ) -> Result<(), Error> {
+        let tex_size = 4096;
+
         let skinning = self.skinning;
-        plan.add_root(self.target);
+        let depth_target = self.depth_target;
+        let evsm_target = self.evsm_target;
+
+        plan.add_root(depth_target);
         plan.define_pass(
-            self.target,
+            depth_target,
             crate::bundle::TargetPlanOutputs {
                 colors: vec![],
                 depth: Some(ImageOptions {
-                    kind: Kind::D2(4096, 4096, 1, 1),
+                    kind: Kind::D2(tex_size, tex_size, 1, 4),
                     levels: 1,
                     format: Format::D32Sfloat,
                     clear: Some(ClearValue::DepthStencil(ClearDepthStencil(1.0, 0))),
                 }),
             },
         )?;
-        plan.extend_target(self.target, move |ctx| {
+        plan.define_pass(
+            evsm_target,
+            crate::bundle::TargetPlanOutputs {
+                colors: vec![OutputColor::Image(ImageOptions {
+                    kind: Kind::D2(tex_size, tex_size, 1, 1),
+                    levels: 4,
+                    format: Format::Rgba32Sfloat,
+                    clear: Some(ClearValue::Color([0.0, 0.0, 0.0, 0.0].into())),
+                })],
+                depth: None,
+            },
+        )?;
+        plan.extend_target(depth_target, move |ctx| {
             ctx.add(
                 RenderOrder::Opaque,
                 DrawShadows3DDesc::<B>::new()
                     .with_skinning(skinning)
                     .builder(),
             )?;
+            Ok(())
+        });
+        plan.extend_target(evsm_target, move |ctx| {
+            let depth_node = ctx.get_node(depth_target)?;
+            let depth = ctx.get_image(TargetImage::Depth(depth_target))?;
+            // let mips_image = ctx.create_image(ImageOptions {
+            //     kind: Kind::D2(tex_size, tex_size, 1, 1),
+            //     levels: 4,
+            //     format: Format::R32Sfloat,
+            //     clear: Some(ClearValue::Color([0.0, 0.0, 0.0, 0.0].into())),
+            // });
+            // ctx.add_dep(mips_node);
+
+            ctx.add(
+                0,
+                DrawFullscreenTriangleDesc::new(depth, crate::pass::FILTER_EVSM_FRAGMENT.clone())
+                    .builder(),
+            )?;
+            ctx.add_post(0, move |ctx, dep| {
+                let evsm = ctx.get_image(TargetImage::Color(evsm_target, 0))?;
+                let mips_node = ctx
+                    .graph()
+                    .add_node(GenerateMips::<B>::builder(evsm, None).with_dependency(dep));
+                Ok(mips_node)
+            });
             Ok(())
         });
         Ok(())

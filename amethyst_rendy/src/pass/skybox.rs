@@ -1,9 +1,9 @@
 use crate::{
     palette::Srgb,
     pipeline::{PipelineDescBuilder, PipelinesBuilder},
-    pod::IntoPod,
+    pod::{IntoPod, ProjView},
     shape::Shape,
-    submodules::{DynamicUniform, FlatEnvironmentSub},
+    submodules::{gather::CameraGatherer, DynamicUniform},
     types::Backend,
     util,
 };
@@ -96,7 +96,7 @@ impl<B: Backend> RenderGroupDesc<B, World> for DrawSkyboxDesc {
         #[cfg(feature = "profiler")]
         profile_scope!("build");
 
-        let env = FlatEnvironmentSub::new(factory)?;
+        let env = DynamicUniform::new(factory, rendy::hal::pso::ShaderStageFlags::VERTEX)?;
         let colors = DynamicUniform::new(factory, pso::ShaderStageFlags::FRAGMENT)?;
         let mesh = Shape::Sphere(16, 16)
             .generate::<Vec<PosTex>>(None)
@@ -126,7 +126,7 @@ impl<B: Backend> RenderGroupDesc<B, World> for DrawSkyboxDesc {
 pub struct DrawSkybox<B: Backend> {
     pipeline: B::GraphicsPipeline,
     pipeline_layout: B::PipelineLayout,
-    env: FlatEnvironmentSub<B>,
+    env: DynamicUniform<B, ProjView>,
     colors: DynamicUniform<B, SkyboxUniform>,
     mesh: Mesh<B>,
     default_settings: SkyboxSettings,
@@ -148,7 +148,9 @@ impl<B: Backend> RenderGroup<B, World> for DrawSkybox<B> {
             .map(|s| s.uniform())
             .unwrap_or_else(|| self.default_settings.uniform());
 
-        self.env.process(factory, index, resources);
+        let projview = CameraGatherer::gather(resources).projview;
+        self.env.write(factory, index, projview);
+
         let changed = self.colors.write(factory, index, settings);
 
         if changed {
@@ -216,14 +218,14 @@ fn build_skybox_pipeline<B: Backend>(
                 .with_layout(&pipeline_layout)
                 .with_subpass(subpass)
                 .with_framebuffer_size(framebuffer_width, framebuffer_height)
-                .with_depth_test(pso::DepthTest::On {
+                .with_depth_test(Some(pso::DepthTest {
                     fun: pso::Comparison::LessEqual,
                     write: false,
-                })
-                .with_blend_targets(vec![pso::ColorBlendDesc(
-                    pso::ColorMask::ALL,
-                    pso::BlendState::Off,
-                )]),
+                }))
+                .with_blend_targets(vec![pso::ColorBlendDesc {
+                    mask: pso::ColorMask::ALL,
+                    blend: None,
+                }]),
         )
         .build(factory, None);
 

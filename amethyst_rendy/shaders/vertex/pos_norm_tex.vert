@@ -1,8 +1,7 @@
 #version 450
 
-layout(std140, set = 0, binding = 0) uniform Projview {
-    mat4 proj;
-    mat4 view;
+layout(std140, set = 0, binding = 0) uniform ViewArgs {
+    mat4 world_to_view;
 };
 
 layout(location = 0) in vec3 position;
@@ -24,5 +23,5 @@ void main() {
     vertex.normal = mat3(model) * normal;
     vertex.tex_coord = tex_coord;
     vertex.color = tint;
-    gl_Position = proj * view * vertex_position;
+    gl_Position = world_to_view * vertex_position;
 }

@@ -144,15 +144,15 @@ impl<B: Backend> PerImageEnvironmentSub<B> {
             .limits()
             .min_uniform_buffer_offset_alignment;
 
-        let projview_size = util::align_size::<pod::ViewArgs>(align, 1);
+        let viewargs_size = util::align_size::<pod::ViewArgs>(align, 1);
         let env_buf_size = util::align_size::<pod::Environment>(align, 1);
         let plight_buf_size = util::align_size::<pod::PointLight>(align, MAX_POINT_LIGHTS);
         let dlight_buf_size = util::align_size::<pod::DirectionalLight>(align, MAX_DIR_LIGHTS);
         let slight_buf_size = util::align_size::<pod::SpotLight>(align, MAX_SPOT_LIGHTS);
         let shadow_buf_size = util::align_size::<pod::ShadowData>(align, 1);
 
-        let projview_range = 0..projview_size;
-        let env_range = util::next_range(&projview_range, env_buf_size);
+        let viewargs_range = 0..viewargs_size;
+        let env_range = util::next_range(&viewargs_range, env_buf_size);
         let plight_range = util::next_range(&env_range, plight_buf_size);
         let dlight_range = util::next_range(&plight_range, dlight_buf_size);
         let slight_range = util::next_range(&dlight_range, slight_buf_size);
@@ -174,7 +174,7 @@ impl<B: Backend> PerImageEnvironmentSub<B> {
                 let buffer = buffer.raw();
                 let env_set = self.set.raw();
 
-                let desc_projview = Descriptor::Buffer(buffer, opt_range(projview_range.clone()));
+                let desc_viewargs = Descriptor::Buffer(buffer, opt_range(viewargs_range.clone()));
                 let desc_env = Descriptor::Buffer(buffer, opt_range(env_range.clone()));
                 let desc_plight = Descriptor::Buffer(buffer, opt_range(plight_range.clone()));
                 let desc_dlight = Descriptor::Buffer(buffer, opt_range(dlight_range.clone()));
@@ -182,7 +182,7 @@ impl<B: Backend> PerImageEnvironmentSub<B> {
                 let desc_shadow = Descriptor::Buffer(buffer, opt_range(shadow_range.clone()));
 
                 let mut sets = vec![
-                    desc_write(env_set, 0, desc_projview),
+                    desc_write(env_set, 0, desc_viewargs),
                     desc_write(env_set, 1, desc_env),
                     desc_write(env_set, 2, desc_plight),
                     desc_write(env_set, 3, desc_dlight),
@@ -206,7 +206,7 @@ impl<B: Backend> PerImageEnvironmentSub<B> {
 
             let CameraGatherer {
                 camera_position,
-                projview,
+                viewargs,
                 camera_view,
                 ..
             } = CameraGatherer::gather(world);
@@ -298,11 +298,11 @@ impl<B: Backend> PerImageEnvironmentSub<B> {
                     let light_proj = Orthographic::new(-20.0, 20.0, -20.0, 20.0, -200.0, 200.0)
                         .as_matrix()
                         .clone();
-                    let view_to_light = (light_proj * light_view);
-
+                    let view_to_light = light_proj * light_view;
                     let view_to_light: [[f32; 4]; 4] = view_to_light.into();
                     Some(pod::ShadowData {
                         view_to_light: view_to_light.into(),
+                        cascades: Default::default(), // TODO: actually prepare cascades
                     })
                 }
                 _ => None,
@@ -325,7 +325,7 @@ impl<B: Backend> PerImageEnvironmentSub<B> {
                 &mut dst_slice[usize_range(shadow_range)],
                 dir_shadows.tap_count(&mut env.shadow_count),
             );
-            write_into_slice(&mut dst_slice[usize_range(projview_range)], Some(projview));
+            write_into_slice(&mut dst_slice[usize_range(viewargs_range)], Some(viewargs));
             write_into_slice(&mut dst_slice[usize_range(env_range)], Some(env));
         }
 

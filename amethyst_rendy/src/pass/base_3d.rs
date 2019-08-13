@@ -6,16 +6,14 @@ use crate::{
     resources::Tint,
     skinning::JointTransforms,
     submodules::{DynamicVertexBuffer, EnvironmentSub, MaterialId, MaterialSub, SkinningSub},
-    transparent::Transparent,
     types::{Backend, Mesh},
     util,
-    visibility::Visibility,
+    visibility::{VisOpaque, VisOpaqueCutoff, VisTransparent, VisibilityDef},
 };
 use amethyst_assets::{AssetStorage, Handle};
 use amethyst_core::{
-    ecs::{Join, Read, ReadExpect, ReadStorage, SystemData, World},
+    ecs::{Join, Read, ReadStorage, SystemData, World},
     transform::Transform,
-    Hidden, HiddenPropagate,
 };
 use derivative::Derivative;
 use rendy::{
@@ -58,6 +56,8 @@ pub trait Base3DPassDef: 'static + std::fmt::Debug + Send + Sync {
 
     /// Returns the vertex `SpirvShader` which will be used for this pass on skinned meshes
     fn vertex_skinned_shader() -> &'static SpirvShader;
+
+    /// TODO: actually need separate shaders for cutout and not cutout
 
     /// Returns the fragment `SpirvShader` which will be used for this pass
     fn fragment_shader() -> &'static SpirvShader;
@@ -183,10 +183,10 @@ impl<B: Backend, T: Base3DPassDef> RenderGroupDesc<B, World> for DrawBase3DDesc<
 
             // this can probably be made into a submodule on it's own
             let image = ctx.get_image(node_image.id).expect("Image does not exist");
-            let sampler = factory.get_sampler(dbg!(image::SamplerInfo::new(
+            let sampler = factory.get_sampler(image::SamplerInfo::new(
                 image::Filter::Linear,
                 image::WrapMode::Clamp,
-            )))?;
+            ))?;
             let image_view = factory.create_image_view(
                 image.clone(),
                 ImageViewInfo {
@@ -255,10 +255,8 @@ impl<B: Backend, T: Base3DPassDef> RenderGroup<B, World> for DrawBase3D<B, T> {
 
         let (
             mesh_storage,
-            visibility,
-            transparent,
-            hiddens,
-            hiddens_prop,
+            vis_opaque,
+            vis_opaque_cutoff,
             meshes,
             materials,
             transforms,
@@ -266,10 +264,8 @@ impl<B: Backend, T: Base3DPassDef> RenderGroup<B, World> for DrawBase3D<B, T> {
             tints,
         ) = <(
             Read<'_, AssetStorage<Mesh>>,
-            ReadExpect<'_, Visibility>,
-            ReadStorage<'_, Transparent>,
-            ReadStorage<'_, Hidden>,
-            ReadStorage<'_, HiddenPropagate>,
+            Read<'_, VisOpaque>,
+            Read<'_, VisOpaqueCutoff>,
             ReadStorage<'_, Handle<Mesh>>,
             ReadStorage<'_, Handle<Material>>,
             ReadStorage<'_, Transform>,
@@ -290,13 +286,22 @@ impl<B: Backend, T: Base3DPassDef> RenderGroup<B, World> for DrawBase3D<B, T> {
         let statics_ref = &mut self.static_batches;
         let skinned_ref = &mut self.skinned_batches;
 
-        let static_input = || ((&materials, &meshes, &transforms, tints.maybe()), !&joints);
-        let skinned_input = || (&materials, &meshes, &transforms, tints.maybe(), &joints);
+        let mut static_input = (&materials, &meshes, &transforms, tints.maybe(), !&joints).join();
+        let mut skinned_input = (&materials, &meshes, &transforms, tints.maybe(), &joints).join();
+
+        // We don't care about cutoff here, as this is usually rendered after depth prepass
+        let all_opaques = || {
+            vis_opaque
+                .entities()
+                .iter()
+                .chain(vis_opaque_cutoff.entities())
+        };
+
         {
             profile_scope_impl!("prepare");
-            (static_input(), &visibility.visible_unordered)
-                .join()
-                .map(|(((mat, mesh, tform, tint), _), _)| {
+            all_opaques()
+                .filter_map(|e| static_input.get_unchecked(e.id()))
+                .map(|(mat, mesh, tform, tint, _)| {
                     ((mat, mesh.id()), VertexArgs::from_object_data(tform, tint))
                 })
                 .for_each_group(|(mat, mesh_id), data| {
@@ -309,10 +314,9 @@ impl<B: Backend, T: Base3DPassDef> RenderGroup<B, World> for DrawBase3D<B, T> {
         }
         if self.pipeline_skinned.is_some() {
             profile_scope_impl!("prepare_skinning");
-
-            (skinned_input(), &visibility.visible_unordered)
-                .join()
-                .map(|((mat, mesh, tform, tint, joints), _)| {
+            all_opaques()
+                .filter_map(|e| skinned_input.get_unchecked(e.id()))
+                .map(|(mat, mesh, tform, tint, joints)| {
                     (
                         (mat, mesh.id()),
                         SkinnedVertexArgs::from_object_data(
@@ -588,10 +592,10 @@ impl<B: Backend, T: Base3DPassDef> RenderGroup<B, World> for DrawBase3DTranspare
     ) -> PrepareResult {
         profile_scope_impl!("prepare transparent");
 
-        let (mesh_storage, visibility, meshes, materials, transforms, joints, tints) =
+        let (mesh_storage, vis_transparent, meshes, materials, transforms, joints, tints) =
             <(
                 Read<'_, AssetStorage<Mesh>>,
-                ReadExpect<'_, Visibility>,
+                Read<'_, VisTransparent>,
                 ReadStorage<'_, Handle<Mesh>>,
                 ReadStorage<'_, Handle<Material>>,
                 ReadStorage<'_, Transform>,
@@ -613,8 +617,8 @@ impl<B: Backend, T: Base3DPassDef> RenderGroup<B, World> for DrawBase3DTranspare
         let mut changed = false;
 
         let mut joined = ((&materials, &meshes, &transforms, tints.maybe()), !&joints).join();
-        visibility
-            .visible_ordered
+        vis_transparent
+            .entities()
             .iter()
             .filter_map(|e| joined.get_unchecked(e.id()))
             .map(|((mat, mesh, tform, tint), _)| {
@@ -633,8 +637,8 @@ impl<B: Backend, T: Base3DPassDef> RenderGroup<B, World> for DrawBase3DTranspare
         if self.pipeline_skinned.is_some() {
             let mut joined = (&materials, &meshes, &transforms, tints.maybe(), &joints).join();
 
-            visibility
-                .visible_ordered
+            vis_transparent
+                .entities()
                 .iter()
                 .filter_map(|e| joined.get_unchecked(e.id()))
                 .map(|(mat, mesh, tform, tint, joints)| {
@@ -815,18 +819,18 @@ fn build_pipelines<B: Backend, T: Base3DPassDef>(
         .with_subpass(subpass)
         .with_framebuffer_size(framebuffer_width, framebuffer_height)
         .with_face_culling(pso::Face::BACK)
-        .with_depth_test(pso::DepthTest::On {
+        .with_depth_test(Some(pso::DepthTest {
             fun: pso::Comparison::Less,
             write: !transparent,
-        })
-        .with_blend_targets(vec![pso::ColorBlendDesc(
-            pso::ColorMask::ALL,
-            if transparent {
-                pso::BlendState::PREMULTIPLIED_ALPHA
+        }))
+        .with_blend_targets(vec![pso::ColorBlendDesc {
+            mask: pso::ColorMask::ALL,
+            blend: if transparent {
+                Some(pso::BlendState::PREMULTIPLIED_ALPHA)
             } else {
-                pso::BlendState::Off
+                None
             },
-        )]);
+        }]);
 
     let pipelines = if skinning {
         let shader_vertex_skinned = unsafe { T::vertex_skinned_shader().module(factory).unwrap() };

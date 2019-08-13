@@ -62,7 +62,7 @@ impl Default for MaterialPrefab {
             cavity: None,
             uv_offset: TextureOffset::default(),
             transparent: false,
-            alpha_cutoff: std::f32::MIN_POSITIVE,
+            alpha_cutoff: 0.0,
             handle: None,
         }
     }

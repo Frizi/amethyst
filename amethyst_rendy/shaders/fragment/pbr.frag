@@ -1,13 +1,7 @@
 #version 450
 
-struct Partition
-{
-    float intervalBegin;
-    float intervalEnd;
-    // These are given in texture coordinate [0, 1] space
-    vec3 scale;
-    vec3 bias;
-};
+#include "header/math.frag"
+#include "header/evsm.frag"
 
 struct PointLight {
     vec3 position;
@@ -52,16 +46,9 @@ layout(std140, set = 0, binding = 4) uniform SpotLights {
     SpotLight slight[128];
 };
 
-layout(std140, set = 0, binding = 5) uniform ShadowData {
-    mat4 view_to_light;
-};
-
-layout(set = 0, binding = 6) uniform sampler2DArray shadow_map;
-
-struct UvOffset {
-    vec2 u_offset;
-    vec2 v_offset;
-};
+#define SHADOWS_DESC_SET 0
+#define SHADOWS_DESC_BINDING_OFFSET 5
+#include "header/shadow_map.frag"
 
 layout(std140, set = 1, binding = 0) uniform Material {
     UvOffset uv_offset;
@@ -86,43 +73,6 @@ layout(location = 0) in VertexData {
 
 layout(location = 0) out vec4 out_color;
 
-// #include "../evsm.glsl"
-
-const float PI = 3.14159265359;
-
-float tex_coord(float coord, vec2 offset) {
-    return offset.x + coord * (offset.y - offset.x);
-}
-
-vec2 tex_coords(vec2 coord, vec2 u, vec2 v) {
-    return vec2(tex_coord(coord.x, u), tex_coord(coord.y, v));
-}
-
-float normal_distribution(vec3 N, vec3 H, float a) {
-    float a2 = a * a;
-    float NdotH = max(dot(N, H), 0.0);
-    float NdotH2 = NdotH*NdotH;
-
-    float denom = (NdotH2 * (a2 - 1.0) + 1.0);
-    denom = PI * denom * denom;
-
-    return (a2 + 0.0000001) / denom;
-}
-
-float geometry(float NdotV, float NdotL, float r2) {
-    float a1 = r2 + 1.0;
-    float k = a1 * a1 / 8.0;
-    float denom = NdotV * (1.0 - k) + k;
-    float ggx1 = NdotV / denom;
-    denom = NdotL * (1.0 - k) + k;
-    float ggx2 = NdotL / denom;
-    return ggx1 * ggx2;
-}
-
-vec3 fresnel(float HdotV, vec3 fresnel_base) {
-    return fresnel_base + (1.0 - fresnel_base) * pow(1.0 - HdotV, 5.0);
-}
-
 vec3 compute_light(vec3 attenuation,
                    vec3 light_color,
                    vec3 view_direction,
@@ -134,15 +84,15 @@ vec3 compute_light(vec3 attenuation,
                    vec3 fresnel_base) {
 
     vec3 halfway = normalize(view_direction + light_direction);
-    float normal_distribution = normal_distribution(normal, halfway, roughness2);
+    float normal_distribution = ggx_normal_distribution(normal, halfway, roughness2);
 
     float NdotV = max(dot(normal, view_direction), 0.0);
     float NdotL = max(dot(normal, light_direction), 0.0);
     float HdotV = max(dot(halfway, view_direction), 0.0);
-    float geometry = geometry(NdotV, NdotL, roughness2);
+    float geometry = ggx_geometry(NdotV, NdotL, roughness2);
 
 
-    vec3 fresnel = fresnel(HdotV, fresnel_base);
+    vec3 fresnel = schlick_fresnel(HdotV, fresnel_base);
     vec3 diffuse = vec3(1.0) - fresnel;
     diffuse *= 1.0 - metallic;
 
@@ -154,19 +104,8 @@ vec3 compute_light(vec3 attenuation,
     return resulting_light;
 }
 
-float shadow_contribution_threshold(uint light_idx, vec2 tex_coord, vec2 tex_coord_dx, vec2 tex_coord_dy, float depth, Partition part, uint textureArrayIndex)
-{
-    vec4 occluder = texture(shadow_map, vec3(tex_coord, textureArrayIndex));
-    return occluder.x + 0.00001 >= depth ? 1.0 : 0.0;
-}
-
-vec3 project_into_light_tex_coord(uint shadow_idx) {
-    vec4 position_light = view_to_light * vec4(vertex.position, 1.0);
-    return (position_light.xyz / position_light.w) * vec3(0.5, 0.5, 1.0) + vec3(0.5, 0.5, 0.0);
-}
-
 void main() {
-    vec2 final_tex_coords   = tex_coords(vertex.tex_coord, uv_offset.u_offset, uv_offset.v_offset);
+    vec2 final_tex_coords   = tex_coords(vertex.tex_coord, uv_offset);
     vec4 albedo_alpha       = texture(albedo, final_tex_coords);
     float alpha             = albedo_alpha.a;
     if(alpha < alpha_cutoff) discard;
@@ -216,19 +155,13 @@ void main() {
     for (; i < shadow_count; i++) {
         vec3 light_direction = -normalize(dlight[i].direction);
         float attenuation = dlight[i].intensity;
-        vec3 projected = project_into_light_tex_coord(i);
-        vec2 tex_coord = projected.xy;
-        vec2 tex_coord_dx = dFdx(tex_coord);
-        vec2 tex_coord_dy = dFdy(tex_coord);
         
-        const Partition part = Partition(
-            0.0,
-            1.0,
-            vec3(1.0, 1.0, 1.0),
-            vec3(0.0, 0.0, 0.0)
-        );
+        vec3 pos_dx = dFdx(vertex.position);
+        vec3 pos_dy = dFdy(vertex.position);
+        const float pixels = 2.0;
 
-        attenuation *= shadow_contribution_threshold(i, tex_coord, tex_coord_dx, tex_coord_dy, projected.z, part, 0);
+        vec3 projected = project_into_light_tex_coord(shadows[i].view_to_light, vec4(vertex.position, 1.0));
+        attenuation *= shadow_contribution(shadow_map_atlas, projected.xy, projected.z, 1.0, 0);
         
     // if (surface.positionView.z < partition.intervalEnd) {
     //     float3 tex_coord = surface.lighttex_coord.xyz * partition.scale.xyz + partition.bias.xyz;

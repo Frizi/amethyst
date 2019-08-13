@@ -1,8 +1,7 @@
 #version 450
 
-layout(std140, set = 0, binding = 0) uniform Projview {
-    mat4 proj;
-    mat4 view;
+layout(std140, set = 0, binding = 0) uniform ViewArgs {
+    mat4 world_to_view;
 };
 
 layout(std430, set = 2, binding = 0) readonly buffer JointTransforms {
@@ -21,5 +20,5 @@ void main() {
         joint_weights.y * joints[int(joints_offset + joint_ids.y)] +
         joint_weights.z * joints[int(joints_offset + joint_ids.z)] +
         joint_weights.w * joints[int(joints_offset + joint_ids.w)];
-    gl_Position = proj * view * model * joint_transform * vec4(position, 1.0);
+    gl_Position = world_to_view * model * joint_transform * vec4(position, 1.0);
 }

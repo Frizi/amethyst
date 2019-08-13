@@ -42,27 +42,46 @@ impl TextureOffset {
     }
 }
 
-/// ViewArgs
+/// A pod with premultiplied world to view matrix.
 /// ```glsl,ignore
 /// uniform ViewArgs {
-///    uniform mat4 proj;
-///    uniform mat4 view;
+///    mat4 world_to_view;
 /// };
 /// ```
 #[derive(Clone, Copy, Debug, AsStd140)]
 #[repr(C, align(16))]
 pub struct ViewArgs {
-    /// Projection matrix
-    pub proj: mat4,
-    /// View matrix
-    pub view: mat4,
+    pub world_to_view: mat4,
 }
 
 impl ViewArgs {
-    pub fn from_matrices(proj: Matrix4<f32>, view: Matrix4<f32>) -> Self {
+    /// Create a ViewArgs from projection and view matrix
+    pub fn from_separate_matrices(proj: Matrix4<f32>, view: Matrix4<f32>) -> Self {
+        let world_to_view: [[f32; 4]; 4] = (proj * view).into();
+        ViewArgs {
+            world_to_view: world_to_view.into(),
+        }
+    }
+}
+/// A pod with separate projectio nand view transform matrices.
+/// ```glsl,ignore
+/// uniform ProjView {
+///    mat4 proj;
+///    mat4 view;
+/// };
+/// ```
+#[derive(Clone, Copy, Debug, AsStd140)]
+#[repr(C, align(16))]
+pub struct ProjView {
+    proj: mat4,
+    view: mat4,
+}
+
+impl ProjView {
+    pub fn from_separate_matrices(proj: Matrix4<f32>, view: Matrix4<f32>) -> Self {
         let proj: [[f32; 4]; 4] = proj.into();
         let view: [[f32; 4]; 4] = view.into();
-        ViewArgs {
+        ProjView {
             proj: proj.into(),
             view: view.into(),
         }
@@ -246,10 +265,28 @@ pub struct SpotLight {
     pub smoothness: float,
 }
 
+#[derive(Clone, Copy, Debug, Default, AsStd140)]
+pub struct AtlasSlot {
+    layer: uint,
+    location: uvec2, // integer location on size^2 grid
+    size: uint,      // power of two slot/grid size
+}
+
+#[derive(Clone, Copy, Debug, Default, AsStd140)]
+pub struct Cascade {
+    interval_begin: float,
+    interval_end: float,
+    // These are given in texture coordinate [0, 1] space
+    scale: vec3,
+    bias: vec3,
+    slot: AtlasSlot,
+}
+
 #[derive(Clone, Copy, Debug, AsStd140)]
 pub struct ShadowData {
     /// Transform matrix from view to light space
     pub view_to_light: mat4,
+    pub cascades: [Cascade; 4],
 }
 
 /// Environment Uniform

@@ -1,8 +1,7 @@
 #version 450
 
 layout(std140, set = 0, binding = 0) uniform ViewArgs {
-    uniform mat4 proj;
-    uniform mat4 view;
+    uniform mat4 world_to_view;
 };
 
 layout(std140, set = 1, binding = 0) uniform DebugLinesArgs {
@@ -22,9 +21,8 @@ void main() {
     float factor = float(gl_VertexIndex >> 1);
     vertex.color = mix(color_a, color_b, factor);
 
-    mat4 proj_view = proj * view;
-    vec4 projected_a = proj_view * vec4(position_a, 1.0);
-    vec4 projected_b = proj_view * vec4(position_b, 1.0);
+    vec4 projected_a = world_to_view * vec4(position_a, 1.0);
+    vec4 projected_b = world_to_view * vec4(position_b, 1.0);
     vec4 proj_current = mix(projected_a, projected_b, factor);
 
     if (proj_current.w < 0) {
