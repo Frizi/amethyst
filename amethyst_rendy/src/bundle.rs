@@ -155,7 +155,7 @@ impl<B: Backend> RenderPlan<B> {
     fn new() -> Self {
         Self {
             targets: Default::default(),
-            roots: vec![],
+            roots: Vec::new(),
         }
     }
 
@@ -173,6 +173,10 @@ impl<B: Backend> RenderPlan<B> {
         target: Target,
         outputs: TargetPlanOutputs<B>,
     ) -> Result<(), Error> {
+        for foreign in outputs.pre_foreigns() {
+            self.add_lazy_dep(foreign.target(), target);
+        }
+
         let target_plan = self
             .targets
             .entry(target)
@@ -181,6 +185,14 @@ impl<B: Backend> RenderPlan<B> {
         target_plan.set_outputs(outputs)?;
 
         Ok(())
+    }
+    fn add_lazy_dep(&mut self, target: Target, dep: Target) {
+        let target_plan = self
+            .targets
+            .entry(target)
+            .or_insert_with(|| TargetPlan::new(target));
+
+        target_plan.add_lazy_dep(dep);
     }
 
     /// Extend the rendering plan of a render target. Target can be defined in other plugins.
@@ -203,7 +215,9 @@ impl<B: Backend> RenderPlan<B> {
             target_metadata: self
                 .targets
                 .iter()
-                .filter_map(|(k, t)| unsafe { t.metadata(factory.physical()) }.map(|m| (*k, m)))
+                .filter_map(|(k, t)| {
+                    unsafe { t.metadata(factory.physical(), &self.targets) }.map(|m| (*k, m))
+                })
                 .collect(),
             targets: self.targets,
             evaluations: Default::default(),
@@ -222,6 +236,7 @@ impl<B: Backend> RenderPlan<B> {
 #[derive(Debug)]
 enum EvaluationState {
     Evaluating,
+    EvaluatedOutputs,
     Built(NodeId),
 }
 
@@ -230,6 +245,12 @@ impl EvaluationState {
         match self {
             EvaluationState::Built(node) => Some(*node),
             _ => None,
+        }
+    }
+    fn has_outputs(&self) -> bool {
+        match self {
+            EvaluationState::Built(_) | EvaluationState::EvaluatedOutputs => true,
+            _ => false,
         }
     }
 
@@ -247,6 +268,15 @@ pub struct TargetMetadata {
     layers: u16,
 }
 
+impl TargetMetadata {
+    fn shrink_to(&mut self, other: TargetMetadata) {
+        use std::cmp::min;
+        self.width = min(self.width, other.width);
+        self.height = min(self.height, other.height);
+        self.layers = min(self.layers, other.layers);
+    }
+}
+
 #[derive(Debug)]
 pub struct PlanContext<B: Backend> {
     targets: HashMap<Target, TargetPlan<B>>,
@@ -257,18 +287,48 @@ pub struct PlanContext<B: Backend> {
 }
 
 impl<B: Backend> PlanContext<B> {
-    pub fn mark_evaluating(&mut self, target: Target) -> Result<(), Error> {
+    pub fn mark_evaluating(&mut self, target: Target, outputs: bool) -> Result<(), Error> {
         match self.evaluations.get(&target) {
-            None => {},
-            Some(EvaluationState::Evaluating) => return Err(format_err!("Trying to evaluate {:?} render plan that is already evaluating. Circular dependency detected.", target)),
             // this case is not a soft runtime error, as this should never be allowed by the API.
             Some(EvaluationState::Built(_)) => panic!("Trying to reevaluate a render plan for {:?}.", target),
+            Some(EvaluationState::EvaluatedOutputs) if outputs => panic!("Trying to reevaluate a render plan outputs for {:?}.", target),
+            Some(EvaluationState::Evaluating) => return Err(format_err!("Trying to evaluate {:?} render plan that is already evaluating. Circular dependency detected.", target)),
+            None if !outputs => panic!("Trying to evaluate a render plan without evaluating outputs for {:?}.", target),
+            None | Some(EvaluationState::EvaluatedOutputs) => {},
         };
         self.evaluations.insert(target, EvaluationState::Evaluating);
         Ok(())
     }
 
+    fn submit_outputs(&mut self, target: Target) {
+        if let Some(EvaluationState::EvaluatedOutputs) | Some(EvaluationState::Built(_)) =
+            self.evaluations.get(&target)
+        {
+            panic!(
+                "Trying to resubmit a render pass outputs for {:?}. This is a RenderingBundle bug.",
+                target
+            );
+        }
+        self.evaluations
+            .insert(target, EvaluationState::EvaluatedOutputs);
+    }
+
+    fn evaluate_outputs(&mut self, target: Target) -> Result<(), Error> {
+        if !self
+            .evaluations
+            .get(&target)
+            .map_or(false, |t| t.has_outputs())
+        {
+            if let Some(mut pass) = self.targets.remove(&target) {
+                pass.evaluate_outputs(self)?;
+                self.targets.insert(target, pass);
+            }
+        }
+        Ok(())
+    }
+
     fn evaluate_target(&mut self, target: Target) -> Result<(), Error> {
+        self.evaluate_outputs(target)?;
         // prevent evaluation of roots that were accessed recursively or undefined
         if let Some(pass) = self.targets.remove(&target) {
             pass.evaluate(self)?;
@@ -277,19 +337,16 @@ impl<B: Backend> PlanContext<B> {
     }
 
     fn submit_target(&mut self, target: Target, node: NodeId) {
-        match self.evaluations.get(&target) {
-            None => {}
-            Some(EvaluationState::Evaluating) => {}
-            // this case is not a soft runtime error, as this should never be allowed by the API.
-            Some(EvaluationState::Built(_)) => panic!(
+        if let Some(EvaluationState::Built(_)) = self.evaluations.get(&target) {
+            panic!(
                 "Trying to resubmit a render pass for {:?}. This is a RenderingBundle bug.",
                 target
-            ),
-        };
+            );
+        }
+
         self.evaluations
             .insert(target, EvaluationState::Built(node));
     }
-
     fn get_target_node_raw(&self, target: Target) -> Option<NodeId> {
         self.evaluations.get(&target).and_then(|p| p.node())
     }
@@ -322,13 +379,7 @@ impl<B: Backend> PlanContext<B> {
     }
 
     pub fn try_get_image(&mut self, image_ref: TargetImage) -> Result<Option<ImageId>, Error> {
-        if !self
-            .evaluations
-            .get(&image_ref.target())
-            .map_or(false, |t| t.is_built())
-        {
-            self.evaluate_target(image_ref.target())?;
-        }
+        self.evaluate_outputs(image_ref.target())?;
         Ok(self.outputs.get(&image_ref).cloned())
     }
 
@@ -396,6 +447,7 @@ impl<'a, B: Backend> TargetPlanContext<'a, B> {
         Ok(())
     }
 
+    /// Modify a pass after it has been constructed as a node, possibly adding another node in the chain.
     pub fn add_post(
         &mut self,
         order: impl Into<i32>,
@@ -418,15 +470,11 @@ impl<'a, B: Backend> TargetPlanContext<'a, B> {
     ///
     /// Results in an error if such image doesn't exist or
     /// retreiving it would result in a dependency cycle.
-    pub fn get_image(&mut self, image: TargetImage) -> Result<ImageId, Error> {
-        self.plan_context.get_image(image).map(|i| {
-            let node = self
-                .plan_context
-                .get_target_node_raw(image.target())
-                .expect("Image without target node");
-            self.add_dep(node);
-            i
-        })
+    pub fn get_image(&mut self, target_image: TargetImage) -> Result<ImageId, Error> {
+        let image = self.plan_context.get_image(target_image)?;
+        let node = self.plan_context.get_node(target_image.target())?;
+        self.add_dep(node);
+        Ok(image)
     }
 
     /// Create new local image
@@ -438,17 +486,13 @@ impl<'a, B: Backend> TargetPlanContext<'a, B> {
     /// Returns `None` when such image isn't registered.
     ///
     /// Results in an error if retreiving it would result in a dependency cycle.
-    pub fn try_get_image(&mut self, image: TargetImage) -> Result<Option<ImageId>, Error> {
-        self.plan_context.try_get_image(image).map(|i| {
-            i.map(|i| {
-                let node = self
-                    .plan_context
-                    .get_target_node_raw(image.target())
-                    .expect("Image without target node");
-                self.add_dep(node);
-                i
-            })
-        })
+    pub fn try_get_image(&mut self, target_image: TargetImage) -> Result<Option<ImageId>, Error> {
+        let image = self.plan_context.try_get_image(target_image)?;
+        if image.is_some() {
+            let node = self.plan_context.get_node(target_image.target())?;
+            self.add_dep(node);
+        }
+        Ok(image)
     }
 
     /// Add explicit dependency on another node.
@@ -518,6 +562,16 @@ pub enum OutputColor<B: Backend> {
     Image(ImageOptions),
     /// Render directly to a window surface.
     Surface(Surface<B>, Option<hal::command::ClearValue>),
+    /// Render to other pass' image before that pass is rendered.
+    PreForeign(TargetImage),
+}
+
+#[derive(Debug)]
+pub enum OutputDepth {
+    /// Render to image with specified options
+    Image(ImageOptions),
+    /// Render to other pass' image before that pass is rendered.
+    PreForeign(TargetImage),
 }
 
 /// Definition for set of outputs for a given render target.
@@ -526,7 +580,22 @@ pub struct TargetPlanOutputs<B: Backend> {
     /// List of target color outputs with options
     pub colors: Vec<OutputColor<B>>,
     /// Settings for optional depth output
-    pub depth: Option<ImageOptions>,
+    pub depth: Option<OutputDepth>,
+}
+
+impl<B: Backend> TargetPlanOutputs<B> {
+    fn pre_foreigns(&self) -> impl Iterator<Item = &TargetImage> {
+        self.colors
+            .iter()
+            .filter_map(|c| match c {
+                OutputColor::PreForeign(f) => Some(f),
+                _ => None,
+            })
+            .chain(self.depth.as_ref().and_then(|d| match d {
+                OutputDepth::PreForeign(f) => Some(f),
+                _ => None,
+            }))
+    }
 }
 
 #[derive(derivative::Derivative)]
@@ -536,63 +605,138 @@ struct TargetPlan<B: Backend> {
     #[derivative(Debug = "ignore")]
     extensions: Vec<Box<dyn FnOnce(&mut TargetPlanContext<'_, B>) -> Result<(), Error> + 'static>>,
     outputs: Option<TargetPlanOutputs<B>>,
+    lazy_deps: Vec<Target>,
 }
 
 impl<B: Backend> TargetPlan<B> {
     fn new(key: Target) -> Self {
         Self {
             key,
-            extensions: vec![],
+            extensions: Vec::new(),
             outputs: None,
+            lazy_deps: Vec::new(),
+        }
+    }
+
+    fn add_lazy_dep(&mut self, target: Target) {
+        if !self.lazy_deps.contains(&target) {
+            self.lazy_deps.push(target);
         }
     }
 
     // safety:
     // * `physical_device` must be created from same `Instance` as the `Surface` present in output
-    unsafe fn metadata(&self, physical_device: &B::PhysicalDevice) -> Option<TargetMetadata> {
+    unsafe fn metadata(
+        &self,
+        physical_device: &B::PhysicalDevice,
+        foreign_targets: &HashMap<Target, TargetPlan<B>>,
+    ) -> Option<TargetMetadata> {
+        fn surface_metadata<B: Backend>(
+            surface: &Surface<B>,
+            device: &B::PhysicalDevice,
+        ) -> TargetMetadata {
+            if let Some(extent) = unsafe { surface.extent(device) } {
+                TargetMetadata {
+                    width: extent.width,
+                    height: extent.height,
+                    layers: 1,
+                }
+            } else {
+                // Window was just closed, using size of 1 is the least bad option
+                // to default to. The output won't be used, things won't crash and
+                // graph is either going to be destroyed or rebuilt next frame.
+                TargetMetadata {
+                    width: 1,
+                    height: 1,
+                    layers: 1,
+                }
+            }
+        }
+
+        fn image_metadata(options: &ImageOptions) -> TargetMetadata {
+            let extent = options.kind.extent();
+            TargetMetadata {
+                width: extent.width,
+                height: extent.height,
+                layers: options.kind.num_layers(),
+            }
+        }
+
+        fn foreign_metadata<B: Backend>(
+            target_image: TargetImage,
+            device: &B::PhysicalDevice,
+            foreign_targets: &HashMap<Target, TargetPlan<B>>,
+        ) -> Option<TargetMetadata> {
+            if let Some(outputs) = foreign_targets
+                .get(&target_image.target())
+                .and_then(|plan| plan.outputs.as_ref())
+            {
+                match target_image {
+                    TargetImage::Color(_, idx) => outputs
+                        .colors
+                        .get(idx)
+                        .and_then(|color| output_color_metadata(color, device, foreign_targets)),
+                    TargetImage::Depth(_) => outputs
+                        .depth
+                        .as_ref()
+                        .and_then(|depth| output_depth_metadata(depth, device, foreign_targets)),
+                }
+            } else {
+                None
+            }
+        }
+
+        fn output_color_metadata<B: Backend>(
+            color: &OutputColor<B>,
+            device: &B::PhysicalDevice,
+            foreign_targets: &HashMap<Target, TargetPlan<B>>,
+        ) -> Option<TargetMetadata> {
+            match color {
+                OutputColor::Surface(surface, _) => Some(surface_metadata(surface, device)),
+                OutputColor::Image(options) => Some(image_metadata(options)),
+                OutputColor::PreForeign(foregin) => {
+                    foreign_metadata(*foregin, device, foreign_targets)
+                }
+            }
+        }
+
+        fn output_depth_metadata<B: Backend>(
+            depth: &OutputDepth,
+            device: &B::PhysicalDevice,
+            foreign_targets: &HashMap<Target, TargetPlan<B>>,
+        ) -> Option<TargetMetadata> {
+            match depth {
+                OutputDepth::Image(options) => Some(image_metadata(options)),
+                OutputDepth::PreForeign(foreign) => {
+                    foreign_metadata(*foreign, device, foreign_targets)
+                }
+            }
+        }
+
         self.outputs
             .as_ref()
             .map(|TargetPlanOutputs { colors, depth }| {
-                use std::cmp::min;
-                let mut framebuffer_width = u32::max_value();
-                let mut framebuffer_height = u32::max_value();
-                let mut framebuffer_layers = u16::max_value();
+                let mut metadata = TargetMetadata {
+                    width: u32::max_value(),
+                    height: u32::max_value(),
+                    layers: u16::max_value(),
+                };
 
                 for color in colors {
-                    match color {
-                        OutputColor::Surface(surface, _) => {
-                            if let Some(extent) = surface.extent(physical_device) {
-                                framebuffer_width = min(framebuffer_width, extent.width);
-                                framebuffer_height = min(framebuffer_height, extent.height);
-                                framebuffer_layers = min(framebuffer_layers, 1);
-                            } else {
-                                // Window was just closed, using size of 1 is the least bad option
-                                // to default to. The output won't be used, things won't crash and
-                                // graph is either going to be destroyed or rebuilt next frame.
-                                framebuffer_width = min(framebuffer_width, 1);
-                                framebuffer_height = min(framebuffer_height, 1);
-                            }
-                            framebuffer_layers = min(framebuffer_layers, 1);
-                        }
-                        OutputColor::Image(options) => {
-                            let extent = options.kind.extent();
-                            framebuffer_width = min(framebuffer_width, extent.width);
-                            framebuffer_height = min(framebuffer_height, extent.height);
-                            framebuffer_layers = min(framebuffer_layers, options.kind.num_layers());
-                        }
-                    };
+                    if let Some(meta) =
+                        output_color_metadata(&color, physical_device, foreign_targets)
+                    {
+                        metadata.shrink_to(meta);
+                    }
                 }
-                if let Some(options) = depth {
-                    let extent = options.kind.extent();
-                    framebuffer_width = min(framebuffer_width, extent.width);
-                    framebuffer_height = min(framebuffer_height, extent.height);
-                    framebuffer_layers = min(framebuffer_layers, options.kind.num_layers());
+
+                if let Some(meta) = depth.as_ref().and_then(|depth| {
+                    output_depth_metadata(depth, physical_device, foreign_targets)
+                }) {
+                    metadata.shrink_to(meta);
                 }
-                TargetMetadata {
-                    width: framebuffer_width,
-                    height: framebuffer_height,
-                    layers: framebuffer_layers,
-                }
+
+                metadata
             })
     }
 
@@ -611,25 +755,76 @@ impl<B: Backend> TargetPlan<B> {
         self.extensions.push(extension);
     }
 
-    fn evaluate(self, ctx: &mut PlanContext<B>) -> Result<(), Error> {
-        if self.outputs.is_none() {
-            return Err(format_err!(
+    fn get_outputs(&self) -> Result<&TargetPlanOutputs<B>, Error> {
+        match &self.outputs {
+            None => Err(format_err!(
                 "Trying to evaluate not fully defined pass {:?}. Missing `define_pass` call.",
                 self.key
-            ));
+            )),
+            Some(outs) => Ok(outs),
         }
-        let mut outputs = self.outputs.unwrap();
+    }
 
-        ctx.mark_evaluating(self.key)?;
+    fn take_outputs(&mut self) -> Result<TargetPlanOutputs<B>, Error> {
+        match self.outputs.take() {
+            None => Err(format_err!(
+                "Trying to evaluate not fully defined pass {:?}. Missing `define_pass` call.",
+                self.key
+            )),
+            Some(outs) => Ok(outs),
+        }
+    }
+
+    fn evaluate_outputs(&mut self, ctx: &mut PlanContext<B>) -> Result<(), Error> {
+        let outputs = self.get_outputs()?;
+
+        ctx.mark_evaluating(self.key, true)?;
+
+        for (i, color) in outputs.colors.iter().enumerate() {
+            match color {
+                OutputColor::Surface(surface, clear) => {
+                    // Surfaces are not registered
+                }
+                OutputColor::Image(opts) => {
+                    let image = ctx.create_image(opts.clone());
+                    ctx.register_output(TargetImage::Color(self.key, i), image)?;
+                }
+                OutputColor::PreForeign(target_image) => {
+                    let image = ctx.get_image(*target_image)?;
+                    ctx.register_output(TargetImage::Color(self.key, i), image)?;
+                }
+            }
+        }
+
+        match &outputs.depth {
+            None => {}
+            Some(OutputDepth::Image(opts)) => {
+                let image = ctx.create_image(opts.clone());
+                ctx.register_output(TargetImage::Depth(self.key), image)?;
+            }
+            Some(OutputDepth::PreForeign(target_image)) => {
+                let image = ctx.get_image(*target_image)?;
+                ctx.register_output(TargetImage::Depth(self.key), image)?;
+            }
+        }
+
+        ctx.submit_outputs(self.key);
+        Ok(())
+    }
+
+    fn evaluate(mut self, ctx: &mut PlanContext<B>) -> Result<(), Error> {
+        ctx.mark_evaluating(self.key, false)?;
+
+        let mut outputs = self.take_outputs()?;
 
         let mut target_ctx = TargetPlanContext {
             plan_context: ctx,
             key: self.key,
-            actions: vec![],
+            actions: Vec::new(),
             colors: outputs.colors.len(),
             depth: outputs.depth.is_some(),
-            post_mods: vec![],
-            deps: vec![],
+            post_mods: Vec::new(),
+            deps: Vec::new(),
         };
 
         for extension in self.extensions {
@@ -663,18 +858,21 @@ impl<B: Backend> TargetPlan<B> {
                     subpass.add_color_surface();
                     pass.add_surface(surface, clear);
                 }
-                OutputColor::Image(opts) => {
-                    let node = ctx.create_image(opts);
-                    ctx.register_output(TargetImage::Color(self.key, i), node)?;
-                    subpass.add_color(node);
+                OutputColor::Image(_) | OutputColor::PreForeign(_) => {
+                    let image = ctx.get_image(TargetImage::Color(self.key, i))?;
+                    subpass.add_color(image);
                 }
             }
         }
 
-        if let Some(opts) = outputs.depth {
-            let node = ctx.create_image(opts);
-            ctx.register_output(TargetImage::Depth(self.key), node)?;
-            subpass.set_depth_stencil(node);
+        if outputs.depth.is_some() {
+            let image = ctx.get_image(TargetImage::Depth(self.key))?;
+            subpass.set_depth_stencil(image);
+        }
+
+        for target in self.lazy_deps {
+            let node = ctx.get_node(target)?;
+            subpass.add_dependency(node);
         }
 
         for node in deps {
@@ -774,6 +972,8 @@ impl Into<i32> for RenderOrder {
 /// plugins using custom str identifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Target {
+    /// A depth-only pass that feeds initial depth into main pass
+    DepthPrepass,
     /// Default render target for most operations.
     /// Usually the one that gets presented to the window.
     Main,

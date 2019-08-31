@@ -2,7 +2,8 @@
 
 use crate::{
     bundle::{
-        ImageOptions, OutputColor, RenderOrder, RenderPlan, RenderPlugin, Target, TargetImage,
+        ImageOptions, OutputColor, OutputDepth, RenderOrder, RenderPlan, RenderPlugin, Target,
+        TargetImage,
     },
     nodes::GenerateMips,
     pass::*,
@@ -124,7 +125,7 @@ mod window {
                         surface,
                         self.clear.map(ClearValue::Color),
                     )],
-                    depth: Some(depth_options),
+                    depth: Some(OutputDepth::Image(depth_options)),
                 },
             )?;
 
@@ -147,6 +148,8 @@ pub type RenderPbr3D = RenderBase3D<crate::pass::PbrPassDef>;
 pub struct RenderBase3D<D: Base3DPassDef> {
     #[derivative(Default(value = "Target::Main"))]
     target: Target,
+    #[derivative(Default(value = "Target::DepthPrepass"))]
+    prepass_target: Target,
     #[derivative(Default(value = "TargetImage::Color(Target::ShadowMapEvsm, 0)"))]
     shadow_map_image: TargetImage,
     skinning: bool,
@@ -157,6 +160,12 @@ impl<D: Base3DPassDef> RenderBase3D<D> {
     /// Set target to which 3d meshes will be rendered.
     pub fn with_target(mut self, target: Target) -> Self {
         self.target = target;
+        self
+    }
+
+    /// Set target to which depth prepass will be rendered.
+    pub fn with_prepass_target(mut self, prepass_target: Target) -> Self {
+        self.prepass_target = prepass_target;
         self
     }
 
@@ -207,7 +216,7 @@ impl<B: Backend, D: Base3DPassDef> RenderPlugin<B> for RenderBase3D<D> {
     ) -> Result<(), Error> {
         let skinning = self.skinning;
         let shadow_map_image = self.shadow_map_image;
-        let shadow_map_target = plan.extend_target(self.target, move |ctx| {
+        plan.extend_target(self.target, move |ctx| {
             let shadow_map = ctx.try_get_image(shadow_map_image)?;
 
             ctx.add(
@@ -225,6 +234,21 @@ impl<B: Backend, D: Base3DPassDef> RenderPlugin<B> for RenderBase3D<D> {
             )?;
             Ok(())
         });
+
+        plan.define_pass(
+            self.prepass_target,
+            crate::bundle::TargetPlanOutputs {
+                colors: vec![],
+                depth: Some(OutputDepth::PreForeign(TargetImage::Depth(self.target))),
+            },
+        )?;
+        plan.extend_target(self.prepass_target, move |ctx| {
+            ctx.add(
+                RenderOrder::Opaque,
+                DrawDepthDesc::<B>::new().with_skinning(skinning).builder(),
+            )
+        });
+
         Ok(())
     }
 }
@@ -258,12 +282,12 @@ impl<B: Backend> RenderPlugin<B> for RenderShadows3D {
             depth_target,
             crate::bundle::TargetPlanOutputs {
                 colors: vec![],
-                depth: Some(ImageOptions {
+                depth: Some(OutputDepth::Image(ImageOptions {
                     kind: Kind::D2(tex_size, tex_size, 1, 4),
                     levels: 1,
                     format: Format::D32Sfloat,
                     clear: Some(ClearValue::DepthStencil(ClearDepthStencil(1.0, 0))),
-                }),
+                })),
             },
         )?;
         plan.define_pass(
@@ -290,13 +314,6 @@ impl<B: Backend> RenderPlugin<B> for RenderShadows3D {
         plan.extend_target(evsm_target, move |ctx| {
             let depth_node = ctx.get_node(depth_target)?;
             let depth = ctx.get_image(TargetImage::Depth(depth_target))?;
-            // let mips_image = ctx.create_image(ImageOptions {
-            //     kind: Kind::D2(tex_size, tex_size, 1, 1),
-            //     levels: 4,
-            //     format: Format::R32Sfloat,
-            //     clear: Some(ClearValue::Color([0.0, 0.0, 0.0, 0.0].into())),
-            // });
-            // ctx.add_dep(mips_node);
 
             ctx.add(
                 0,

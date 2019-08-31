@@ -67,6 +67,11 @@ pub trait Base3DPassDef: 'static + std::fmt::Debug + Send + Sync {
 
     /// Returns the `VertexFormat` of this pass for skinned meshes
     fn skinned_format() -> Vec<VertexFormat>;
+
+    /// Returns the number of color attachments
+    fn num_colors() -> usize {
+        1
+    }
 }
 
 /// Draw opaque 3d meshes with specified shaders and texture set
@@ -117,6 +122,10 @@ impl<B: Backend, T: Base3DPassDef> RenderGroupDesc<B, World> for DrawBase3DDesc<
             });
         }
         vec
+    }
+
+    fn colors(&self) -> usize {
+        T::num_colors()
     }
 
     fn builder(self) -> DescBuilder<B, World, Self>
@@ -820,17 +829,21 @@ fn build_pipelines<B: Backend, T: Base3DPassDef>(
         .with_framebuffer_size(framebuffer_width, framebuffer_height)
         .with_face_culling(pso::Face::BACK)
         .with_depth_test(Some(pso::DepthTest {
-            fun: pso::Comparison::Less,
+            fun: pso::Comparison::LessEqual,
             write: !transparent,
         }))
-        .with_blend_targets(vec![pso::ColorBlendDesc {
-            mask: pso::ColorMask::ALL,
-            blend: if transparent {
-                Some(pso::BlendState::PREMULTIPLIED_ALPHA)
-            } else {
-                None
-            },
-        }]);
+        .with_blend_targets(
+            std::iter::repeat(pso::ColorBlendDesc {
+                mask: pso::ColorMask::ALL,
+                blend: if transparent {
+                    Some(pso::BlendState::PREMULTIPLIED_ALPHA)
+                } else {
+                    None
+                },
+            })
+            .take(T::num_colors())
+            .collect(),
+        );
 
     let pipelines = if skinning {
         let shader_vertex_skinned = unsafe { T::vertex_skinned_shader().module(factory).unwrap() };

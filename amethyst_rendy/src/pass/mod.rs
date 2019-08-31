@@ -2,6 +2,7 @@
 
 mod base_3d;
 mod debug_lines;
+mod depth;
 mod flat;
 mod flat2d;
 mod fullscreen_triangle;
@@ -11,8 +12,8 @@ mod shadow;
 mod skybox;
 
 pub use self::{
-    base_3d::*, debug_lines::*, flat::*, flat2d::*, fullscreen_triangle::*, pbr::*, shaded::*,
-    shadow::*, skybox::*,
+    base_3d::*, debug_lines::*, depth::*, flat::*, flat2d::*, fullscreen_triangle::*, pbr::*,
+    shaded::*, shadow::*, skybox::*,
 };
 
 define_shaders! {
@@ -34,5 +35,6 @@ define_shaders! {
     static ref SIMPLE_MESH_VERTEX <- "../../compiled/vertex/simple_mesh.vert.spv";
     static ref SHADOW_SKIN_VERTEX <- "../../compiled/vertex/simple_mesh_skin.vert.spv";
     static ref FULLSCREEN_TRIANGLE_VERTEX <- "../../compiled/vertex/fullscreen_triangle.vert.spv";
+    static ref ALPHA_CUTOFF_FRAGMENT <- "../../compiled/fragment/alpha_cutoff.frag.spv";
     [pub(crate)] static ref FILTER_EVSM_FRAGMENT <- "../../compiled/fragment/filter_evsm.frag.spv";
 }

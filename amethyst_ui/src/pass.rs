@@ -23,12 +23,7 @@ use amethyst_rendy::{
             render::{PrepareResult, RenderGroup, RenderGroupDesc},
             GraphContext, NodeBuffer, NodeImage,
         },
-        hal::{
-            self,
-            device::Device,
-            format::Format,
-            pso,
-        },
+        hal::{self, device::Device, format::Format, pso},
         mesh::{AsVertex, VertexFormat},
         shader::Shader,
         texture::palette::load_from_srgba,
