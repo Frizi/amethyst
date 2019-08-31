@@ -12,10 +12,10 @@ impl Base3DPassDef for DepthPassDef {
     const NAME: &'static str = "Pbr";
     type TextureSet = TexAlbedo;
     fn vertex_shader() -> &'static SpirvShader {
-        &super::POS_TEX_VERTEX
+        &super::TEX_VERTEX
     }
     fn vertex_skinned_shader() -> &'static SpirvShader {
-        &super::POS_TEX_SKIN_VERTEX
+        &super::TEX_SKIN_VERTEX
     }
     fn fragment_shader() -> &'static SpirvShader {
         &super::ALPHA_CUTOFF_FRAGMENT

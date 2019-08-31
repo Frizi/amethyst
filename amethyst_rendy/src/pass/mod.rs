@@ -17,6 +17,8 @@ pub use self::{
 };
 
 define_shaders! {
+    static ref TEX_VERTEX <- "../../compiled/vertex/tex.vert.spv";
+    static ref TEX_SKIN_VERTEX <- "../../compiled/vertex/tex_skin.vert.spv";
     static ref POS_TEX_VERTEX <- "../../compiled/vertex/pos_tex.vert.spv";
     static ref POS_TEX_SKIN_VERTEX <- "../../compiled/vertex/pos_tex_skin.vert.spv";
     static ref POS_NORM_TEX_VERTEX <- "../../compiled/vertex/pos_norm_tex.vert.spv";

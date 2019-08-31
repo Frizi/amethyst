@@ -13,6 +13,7 @@ layout(location = 0) out VertexData {
 } vertex;
 
 void main() {
-    gl_Position = world_to_view * model * vec4(position, 1.0);
+    vec4 vertex_position = model * vec4(position, 1.0);
+    gl_Position = world_to_view * vertex_position;
     vertex.tex_coord = tex_coord;
 }
